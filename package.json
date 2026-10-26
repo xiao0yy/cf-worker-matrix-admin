@@ -1,0 +1,18 @@
+{
+  "name": "matrix-r2-admin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/check.mjs",
+    "test": "node tests/worker.test.js",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "4.148.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

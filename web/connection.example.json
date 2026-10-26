@@ -1,0 +1,4 @@
+{
+  "worker_url": "https://matrix-admin.YOUR-SUBDOMAIN.workers.dev",
+  "admin_token": "REPLACE_WITH_RANDOM_ADMIN_TOKEN_AT_LEAST_32_CHARACTERS"
+}

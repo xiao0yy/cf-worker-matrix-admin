@@ -1,0 +1,6 @@
+        # MATRIX_MAILBOX_V1: carry the poller to every future instance.
+        if [[ -x "$control/bin/matrix-mailbox" ]]; then
+            cp -p "$control/bin/matrix-mailbox" "$PREPARING/bundle/payload/control/bin/"
+            cp -p "$control/mailbox-install.sh" "$control/matrix-mailbox.service" "$control/matrix-mailbox.timer" "$PREPARING/bundle/payload/control/"
+            cp -a "$control/mailbox" "$PREPARING/bundle/payload/control/mailbox"
+        fi

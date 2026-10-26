@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "matrix-admin",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-25",
+  "workers_dev": true,
+  "assets": {"directory": "./web", "binding": "ASSETS", "run_worker_first": ["/api/*"]},
+  "r2_buckets": [{"binding": "CONTROL", "bucket_name": "matrix-control"}],
+  "vars": {
+    "CLUSTER_ID": "matrix-personal",
+    "ALLOWED_ORIGINS": "null"
+  },
+  "observability": {"enabled": false}
+}

@@ -1,0 +1,4 @@
+# MATRIX_MAILBOX_V1: installed from the same verified recovery payload.
+if [[ -x "$CONTROL/bin/matrix-mailbox" ]]; then
+    bash "$CONTROL/mailbox-install.sh" --install
+fi

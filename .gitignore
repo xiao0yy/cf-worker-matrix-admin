@@ -1,0 +1,17 @@
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+*.env
+!*.env.example
+connection.json
+**/connection.local.json
+*.key
+*.pem
+bin/
+dist/
+coverage/
+.DS_Store

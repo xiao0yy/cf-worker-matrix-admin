@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "version": "0.1.0",
+  "worker_tests_passed": 20,
+  "poller_tests_passed": 16,
+  "installation_fixture_checks_passed": 4,
+  "go_vet_passed": true,
+  "browser_assets_syntax_checked": true,
+  "wrangler_dry_run_passed": true,
+  "source_secret_scan_passed": true,
+  "cloudflare_deployed": false,
+  "instance_poller_installed": false,
+  "production_commands_submitted": false,
+  "production_services_changed": false,
+  "real_r2_mailbox_roundtrip_tested": false,
+  "two_vps_handover_tested": false,
+  "browser_rendering_tested": false
+}
