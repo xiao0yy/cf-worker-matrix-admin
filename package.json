@@ -1,6 +1,5 @@
 {
   "name": "matrix-r2-admin",
-  "version": "0.1.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,9 +7,8 @@
     "test": "node --test tests/*.test.js",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev --config wrangler.dev.jsonc",
-    "test:go": "bash scripts/test-go.sh",
-    "test:node": "bash scripts/test-node.sh",
-    "release:build": "node scripts/build-release.mjs",
+    "test:go": "go test ./... && go vet ./...",
+    "release:build": "go run ./tools/release build",
     "check:source": "node scripts/audit-source.mjs"
   },
   "devDependencies": {

@@ -1,73 +1,80 @@
-# 架构与不变量
+# 架构与状态
 
-本项目提供单写者的计划交接，不是多主数据库复制。可以停机，优先保留数据和排除并发写入。
+服务器只有一个 Go 模块、一个 `matrix-admin` 可执行程序。不同 systemd unit
+调用它的不同子命令；长时间备份与恢复不会阻塞控制守卫。restic 是固定版本的
+外部存储依赖，Docker/SQLite/nginx/systemd 是主机依赖，不是第二套业务实现。
 
-## 三类状态
+| Go 包 | 职责 |
+| --- | --- |
+| internal/control | R2 条件更新、epoch、本地 journal、停止写者、入口守卫 |
+| internal/mailbox | 管理命令去重、轮询、实例报告 |
+| internal/engine | 准备、快照、上传、恢复、切换及升级编排 |
+| internal/storage | 有界 SigV4 请求，包括空请求体哈希和条件写入 |
+| internal/payload | 配置胶囊、数据库清单、路径及哈希校验 |
+| internal/release | 固定 Release 下载、完整包清单校验、构建身份 |
+| internal/local | 私密文件、原子持久化、进程锁、字面量配置解析 |
 
-1. **公开软件**：Git 提交对应一个不可变 Release。所有实例使用同一包布局，包含备份生产者、恢复适配器、控制器、mailbox、服务模板。不是把某台机器的 deploy 目录打包。
-2. **私密数据**：B2 的 restic 数据库快照，R2 的配置包和 point。point 固定公开工具的版本/manifest SHA、容器 registry digest/image ID、服务身份、一致性和 source epoch。
-3. **运行权威**：R2 control.json 的 owner/epoch/revision/phase，使用条件更新。本地 journal 持久化最高观察值、绑定 epoch、阻断和是否可能写入。UI 报告、DNS、备份和 Agent state.json 都不是运行许可。
+Worker 保留 JavaScript，负责 Access、网页、R2 状态展示和操作请求；不会执行
+数据库恢复。协议版本与程序版本分别管理，实例报告包含运行程序实际的版本、提交及支持的数据协议；管理界面展示该观测。
+服务端及 Worker 必须拒绝不支持的
+协议，不能仅凭“版本更新”猜测格式兼容。
 
-用户在恢复机上只填写 R2 连接与 cluster ID。R2 point 固定配置包与数据库仓库记录的哈希；后者包含 B2 连接和 restic 密码。standby 不读取该仓库记录、不访问 B2。实例 R2 凭据来自本机输入，永远不被历史配置覆盖。B2/媒体凭据轮换后重新发布配置包。媒体继续使用原生 S3，恢复不下载媒体正文。
+## 存储分工
 
-## 计划交接
+R2 保存配置胶囊、恢复点、仓库凭据和控制状态。B2 只保存 restic 数据库快照，
+包括 Tuwunel RocksDB 与 Telegram SQLite。媒体正文继续在 Tuwunel 的 S3
+后端，恢复复用原 bucket/prefix。公开 GitHub 只保存工具与运行包。
 
-| 阶段 | 执行动作 | 失败后的约束 |
-| --- | --- | --- |
-| ONLINE | owner 服务，定期 checkpoint/SQLite 备份 | 非 owner 保持 fenced |
-| REQUESTED | 目标提交 intent，旧 owner 仍拥有当前 epoch | 超时不授权目标 |
-| QUIESCING / QUIESCED | 关闭业务入口，停止相关服务并核验干净停写 | 禁止靠 DNS 推断停写完成 |
-| SNAPSHOTTING | 最终备份、完整恢复校验、隔离数据库启动检查 | 失败保留源数据并保持冻结 |
-| RELEASED | CAS 释放并固定最终 snapshot/hash | 目标先检查工具版本，再领取 next epoch |
-| RESTORING / VALIDATING | 新数据代、固定版本恢复、隔离校验、绑定 canonical mounts | 没有写入前可按同一 operation 重试 |
-| STARTING | 持久化可能写入标记，再启动固定容器 | 禁止覆盖恢复、重建数据代或回退旧数据 |
-| ONLINE | 验证健康并提交目标 owner/next epoch | 旧源保持 RETIRED，保留其数据 |
+本机 `/opt/matrix/config/s3.env` 是唯一用户输入。`agent/host.json` 是 Agent
+确认的本机路径，`agent/runtime.json` 指向生效版本。`deploy/control` 保存
+实例身份和 journal；`generations` 保存恢复的数据、配置与校验记录。
+`releases/X.Y.Z` 保存完整程序，generation 不复制程序或安装脚本。
 
-上线和数据代绑定仍由控制器完成。脚本处理数据，Worker 提交有限指令，不直接写控制归属。管理命令 APPLIED 表示本机调用完成，不代表整个交接结束。
+## 备份提交
 
-源端最终备份必须完整验证，日常在线备份允许两个数据库分别一致，并明确记录这种差异。restic 对固定 SST/文件块进行去重上传；它不是逐条事务复制，也不是零数据丢失的异步数据库副本。
+在线备份获取原生 checkpoint 与 SQLite backup API 快照。二者各自一致，但
+不是跨数据库事务。restic 去重上传数据库；每日至少一次完整回读、全文件哈希
+与 SQLite 校验，其余执行远端清单核对。恢复点发布前验证公开工具可获取，
+依次上传不可变依赖、恢复点，再以 ETag 条件写 latest，最后记录本地成功。
+任一步失败保留 pending 和既有成功记录；同 run ID 重试不重复建立快照。
 
-## 版本与恢复闭环
+最终备份关闭入口、停止 Telegram 与 Tuwunel，核实干净退出和容器身份，再
+复制冻结数据库。完整回读后，在 `--network none` 容器中启动数据库验证，
+生成绑定 operation/instance/epoch 的 receipt。最终备份不擅自修改 latest。
 
-```text
-Git commit → 公共 Release → 实例工具版本
-                                  ↓
-                  checkpoint + SQLite + 私密配置
-                                  ↓
-            R2 point（配置包/hash + B2 快照 + 软件/hash + 镜像 digest）
-                                  ↓
-新 VPS：公开入口 → 固定工具版本 → 少量配置 → standby
-                                  ↓
-R2 交接许可 → R2 固定配置 + B2 固定数据 → 隔离验证 → 新数据代上线
-                                  ↓
-               同一个公开版本继续生产下一份备份
+## 常规交接
+
+```mermaid
+stateDiagram-v2
+    ONLINE --> REQUESTED: 用户指定源与目标
+    REQUESTED --> QUIESCING: 旧实例关闭入口
+    QUIESCING --> QUIESCED: 写者全部停止
+    QUIESCED --> SNAPSHOTTING: 冻结备份与完整验证
+    SNAPSHOTTING --> RELEASED: 提交不可变 receipt 并释放
+    RELEASED --> RESTORING: 目标认领下一 epoch
+    RESTORING --> VALIDATING: 数据恢复与隔离启动验证
+    VALIDATING --> STARTING: 绑定 generation，持久化写入意图
+    STARTING --> ONLINE: 健康检查与条件提交
 ```
 
-公开工具保存在基础 deploy 和活动 generation/deploy；更新必须覆盖两处，否则迁移后生产者会退回旧版本。版本不匹配不能靠修改 S3 标签绕过。
+本地 phase 与远端 phase 是两个日志，并非必须同名；最终备份还有 DRAINING、
+STOPPING、FROZEN、READY 等局部阶段。守卫只允许新鲜 R2 授权、正确 epoch、
+匹配容器/挂载且健康的 owner 服务。R2 不可达超过有效期则关闭入口并停止写者。
+DNS 切换不证明旧实例已停止，Telegram 后台也不依赖 HTTP 流量。
 
-主动升级不依赖“先有一份新版本备份”：先验证新 Release，再执行代码更新，下一次备份引用该 Release。恢复按旧 point 仍使用旧工具，不自动升级数据库。
+任何启动意图写入后，目标数据库可能已有新消息，禁止重放恢复覆盖它。旧 owner
+在 RELEASED 后不得自行恢复；释放前可通过显式 source-resume 撤销。失联节点
+不能仅凭心跳判死并接管。当前未实现强制接管与自动删除旧数据。
 
-## 更新失败
+## 更新与故障
 
-更新锁定 recovery/handover/mailbox/producer，先写 pending-update，再替换公开清单中的文件，最后验证并记录 software.json。身份、凭据、journal、数据库不属于更新清单。
+代码升级与数据恢复是不同命令。升级须先停止服务，保存实例和 journal，复制
+经校验的新包，更新 units，再启动处于 blocked 状态的守卫。成功后由显式
+resume 恢复当前 owner。pending-update 绑定版本和实例，断点重试不能换包。
 
-基础控制器本体或其服务单元发生变化时，只有已 fenced 的安全阶段可更新。在线代码更新不重启控制器；其 ExecStopPost 会停业务，因此不能把重启当作普通文件刷新。
+新程序直接读取支持的数据协议（当前 recovery v2）；快照中的 producer 版本
+仅供溯源，不触发下载并执行旧软件。未知数据格式、目录、文件、镜像身份和
+校验错误均拒绝继续，不猜测兼容性。
 
-更新中断不宣称自动回滚。只重试 pending 记录的同一版本和身份，修复未完成的代码替换。STARTING 或可能写入的阶段拒绝更新/恢复覆盖。新 standby 安装中断则保留目录，Agent 依据本地状态修复，不重建身份。
-
-## 明确边界
-
-支持一个 Tuwunel、一个 mautrix-telegram SQLite、现有 nginx 配置与固定应用网络的 Linux amd64 布局；不是通用 Synapse/任意桥安装器。
-
-没有自动抢占、强制灾难接管、R2 权威重建、自动删除旧数据或自动 prune。公开 Release、镜像和私密恢复点必须一起保留。双 VPS 真实切换需要独立验收，替身测试不能证明公网网络和真实应用登录正常。
-
-## 恢复点提交
-
-1. 同一暂存目录记录数据库一致性、配置和完整 SHA-256 清单。
-2. restic 仅上传 RocksDB 文件和 Telegram SQLite 主库。配置包包含清单及配置字节，不含数据库正文。
-3. 数据库按完整恢复或日常文件树检查验证；交接必须完整恢复并隔离启动验证。
-4. 将仓库记录、配置包和 point 条件写入 R2（If-None-Match），读回比较。已有同名对象只有内容完全一致才能复用。
-5. 日常发布重新核对实例/epoch，并以发布开始时读取的 ETag 更新 latest；竞争失败不会覆盖另一个发布者。备份索引不授予运行权，跨 control/latest 对象没有事务。
-6. 最终交接不修改 latest；以 R2 operation 引用的 point/hash 为准。源未释放前目标不能恢复上线。
-
-失败的暂存数据保留；部分上传不会成为有效的已提交恢复点。本地 last-success 仅在 R2 提交确认后推进。所有仍被 point 引用的配置、仓库记录、restic 快照、Release 和镜像都要保留，不自动清理。
+测试覆盖守卫状态机、条件写入、命令去重、真实 SQLite WAL、restic 临时仓库
+及故障注入；不把这些等同于已完成跨 VPS 的生产切换演练。

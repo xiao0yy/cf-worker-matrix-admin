@@ -1,0 +1,19 @@
+package control
+
+const NginxServer = `location = /_matrix_control_auth {
+    internal;
+    access_log off;
+    proxy_pass http://127.0.0.1:29318/authorize;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header Authorization "";
+    proxy_connect_timeout 1s;
+    proxy_read_timeout 2s;
+}
+location @matrix_guard_unavailable {
+    default_type application/json;
+    add_header Cache-Control "no-store" always;
+    return 503 '{"errcode":"M_UNAVAILABLE","error":"Instance is not authorized or ready"}';
+}
+`
+const NginxLocation = "auth_request /_matrix_control_auth;\nerror_page 401 403 500 502 504 =503 @matrix_guard_unavailable;\n"
