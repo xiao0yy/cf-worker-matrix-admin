@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "restic": {
+    "version": "0.19.1",
+    "platform": "linux/amd64",
+    "url": "https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2",
+    "binary_sha256": "20d4142678d0d95ec11a4759def1b73fd9190abc9ca19e4b62d067c0b387e639"
+  }
+}

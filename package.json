@@ -1,0 +1,27 @@
+{
+  "name": "matrix-r2-admin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/check.mjs",
+    "test": "node --test tests/*.test.js",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --config wrangler.dev.jsonc",
+    "test:go": "bash scripts/test-go.sh",
+    "test:node": "bash scripts/test-node.sh",
+    "release:build": "node scripts/build-release.mjs",
+    "check:source": "node scripts/audit-source.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.148.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "jose": "6.2.13"
+  },
+  "license": "MIT",
+  "description": "Matrix backup, recovery and single-writer instance control with an R2 administration console"
+}

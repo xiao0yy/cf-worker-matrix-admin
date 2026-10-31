@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-worker-matrix-admin",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-25",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/api/*"
+    ]
+  },
+  "keep_vars": true,
+  "observability": {
+    "enabled": false
+  },
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "CONTROL",
+        "type": "inherit"
+      }
+    ]
+  }
+}

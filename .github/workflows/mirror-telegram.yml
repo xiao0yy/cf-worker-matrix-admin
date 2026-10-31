@@ -1,0 +1,54 @@
+name: Mirror Telegram image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Official Telegram image tag (not latest)'
+        required: true
+        default: v0.2610.0
+        type: string
+      expected_digest:
+        description: 'Optional known upstream sha256 digest; leave empty on first discovery'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mirror-telegram
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (Node 24)
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - name: Test image mirroring safeguards
+        run: node --test tests/mirror-telegram.test.js
+      - name: Install registry copy tool
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Copy and verify the official image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEGRAM_VERSION: ${{ inputs.version }}
+          EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+          MIRROR_OUTPUT_DIR: ${{ runner.temp }}/telegram-mirror
+        run: node scripts/mirror-telegram.mjs
+      - name: Keep the image identity report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        with:
+          name: telegram-mirror-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/telegram-mirror/
+          if-no-files-found: ignore
+          retention-days: 90

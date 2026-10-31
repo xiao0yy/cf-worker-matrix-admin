@@ -1,0 +1,35 @@
+[Unit]
+Description=Matrix instance controller and startup guard
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+PartOf=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=root
+UMask=0077
+Environment=GOMAXPROCS=1
+Environment=GOMEMLIMIT=32MiB
+ExecStart=/opt/matrix/deploy/control/bin/matrix-control daemon --config /opt/matrix/deploy/control/local.json
+ExecStopPost=/opt/matrix/deploy/control/bin/matrix-control emergency-stop --config /opt/matrix/deploy/control/local.json
+WatchdogSec=90
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=45
+TimeoutStopSec=75min
+RuntimeDirectory=matrix-control
+RuntimeDirectoryMode=0700
+MemoryMax=64M
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/matrix/deploy/control/state /run/matrix-control
+
+[Install]
+WantedBy=multi-user.target

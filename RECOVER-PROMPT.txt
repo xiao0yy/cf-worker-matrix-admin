@@ -1,0 +1,1 @@
+请按 https://github.com/xiao0yy/cf-worker-matrix-admin/blob/main/node/backup/AGENT.md 为本机准备 Matrix standby；唯一用户配置在 /opt/matrix/config/s3.env，先检查现有实例与依赖，保留已有身份和数据。

@@ -1,0 +1,10 @@
+# Local development only: copy to .dev.vars, chmod 600. Never commit real values.
+# Production values live in Worker Settings > Variables and Secrets.
+CLUSTER_ID=example-cluster
+TEAM_DOMAIN=https://example-team.cloudflareaccess.com
+POLICY_AUD=REPLACE_WITH_APPLICATION_AUD_TAG
+# Optional DNS automation: zone-scoped DNS Read/Edit only.
+# CF_DNS_TOKEN=...
+# CF_ZONE_ID=...
+# CF_RECORD_ID=...
+# CF_RECORD_NAME=origin.example.com

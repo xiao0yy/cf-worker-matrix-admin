@@ -1,0 +1,15 @@
+[Unit]
+Description=Matrix planned handover worker (separate from authorization guard)
+After=matrix-control.service network-online.target docker.service
+Requires=matrix-control.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Environment=GOMAXPROCS=1
+ExecStart=/bin/bash /opt/matrix/deploy/control/handover-worker.sh
+TimeoutStartSec=infinity
+TimeoutStopSec=30min
+Nice=10
+IOSchedulingClass=idle

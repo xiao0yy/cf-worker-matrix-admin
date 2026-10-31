@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "project": "matrix-admin",
+  "release_base_url": "https://github.com/xiao0yy/cf-worker-matrix-admin/releases/download",
+  "platform": "linux/amd64",
+  "protocols": {"control": 1, "mailbox": 1, "recovery": 2},
+  "restic_version": "0.19.1"
+}

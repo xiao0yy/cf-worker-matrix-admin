@@ -1,0 +1,91 @@
+name: Release
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag, e.g. v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (Node 24)
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+          cache: npm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (Node 24)
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Validate source and release identity
+        id: identity
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: node scripts/release-context.mjs
+      - run: sudo apt-get update && sudo apt-get install -y jq sqlite3 bzip2
+      - run: npm ci
+      - run: npm test && npm run build && npm run check:source && npm run test:go
+      - name: Build and verify public runtime
+        run: npm run release:build
+      - name: Isolated node integration tests
+        run: |
+          mkdir "$RUNNER_TEMP/matrix-runtime"
+          tar -xzf "dist/v$(cat VERSION)/matrix-admin-linux-amd64.tar.gz" -C "$RUNNER_TEMP/matrix-runtime"
+          sudo env PATH="$PATH" RESTIC_TEST_BINARY="$RUNNER_TEMP/matrix-runtime/backup/bin/restic" bash scripts/test-node.sh
+      # Record the name in the successful build's outputs. Re-running only the
+      # publish job must reuse that artifact, not the new run_attempt's name.
+      - name: Record tested artifact name
+        id: artifact
+        run: echo "name=runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: dist/v${{ steps.identity.outputs.version }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 (Node 24)
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (Node 24)
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-assets
+      - name: Verify and publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: node scripts/publish-release.mjs release-assets

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Matrix local agent observation",
+  "type": "object",
+  "required": ["schema", "authority", "observed_at", "phase", "paths", "dependencies", "checks", "instance"],
+  "properties": {
+    "schema": {"const": 1},
+    "authority": {"const": "observation-only"},
+    "observed_at": {"type": "string"},
+    "phase": {"enum": ["NEEDS_DEPENDENCIES", "NEEDS_ATTENTION", "READY_TO_PREPARE", "PARTIAL", "STANDBY", "IN_PROGRESS", "ONLINE", "RETIRED", "BLOCKED"]},
+    "paths": {"type": "object"},
+    "dependencies": {"type": "object", "additionalProperties": {"type": "object", "required": ["state", "resolved_path", "version"], "properties": {"state": {"enum": ["present", "missing", "broken"]}, "resolved_path": {"type": ["string", "null"]}, "version": {"type": ["string", "null"]}}}},
+    "checks": {"type": "object"},
+    "instance": {"type": ["object", "null"]}
+  },
+  "additionalProperties": false
+}
