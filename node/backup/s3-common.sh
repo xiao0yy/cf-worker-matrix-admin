@@ -23,14 +23,19 @@ load_s3() {
 }
 s3() {
     local method=$1 key=$2 file=$3 condition=${4:-} code
+    # R2 requires this header for all methods. curl 7.x can compute the SigV4
+    # signature without emitting it for GET/HEAD; explicitly hash the empty body.
+    local empty_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
     local -a conditional=()
     [[ -z "$condition" ]] || conditional=(--header "$condition")
     [[ "$key" =~ ^[a-zA-Z0-9._/-]+$ && "$key" != *..* ]] || fail 'Invalid S3 object key'
     if [[ "$method" == HEAD ]]; then
         code=$(curl --config "$AUTH" --silent --show-error --proto '=https' --connect-timeout 20 --max-time 60 \
+            --header "x-amz-content-sha256: $empty_sha256" \
             --retry 3 --head --output "$file" --write-out '%{http_code}' "$S3_ENDPOINT/$S3_BUCKET/$key") || return 1
     elif [[ "$method" == GET ]]; then
         code=$(curl --config "$AUTH" --silent --show-error --proto '=https' --connect-timeout 20 --max-time 1800 \
+            --header "x-amz-content-sha256: $empty_sha256" \
             --max-filesize 33554432 --retry 3 --retry-delay 2 --dump-header "$WORK/headers" --output "$file" --write-out '%{http_code}' "$S3_ENDPOINT/$S3_BUCKET/$key") || return 1
     else
         code=$(curl --config "$AUTH" --silent --show-error --proto '=https' --connect-timeout 20 --max-time 1800 \

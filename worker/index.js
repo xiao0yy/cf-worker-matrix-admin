@@ -38,7 +38,7 @@ async function status(env) {
   const control=await authority(env), keys=await allObjects(env.CONTROL,prefix(env)+'instances/');
   const ids=keys.filter(x=>x.key.endsWith('.json')).map(x=>x.key.slice((prefix(env)+'instances/').length,-5)).filter(safe);
   const instances=await Promise.all(ids.map(id=>readInstance(env,id)));
-  return {schema:1,version:'0.1.0',at:new Date().toISOString(),control,instances,capabilities:{mailbox:1,planned_handover:true,force_takeover:false,automatic_cleanup:false,dns:!!(env.CF_DNS_TOKEN&&env.CF_ZONE_ID&&env.CF_RECORD_ID&&env.CF_RECORD_NAME)}};
+  return {schema:1,version:'0.1.1',at:new Date().toISOString(),control,instances,capabilities:{mailbox:1,planned_handover:true,force_takeover:false,automatic_cleanup:false,dns:!!(env.CF_DNS_TOKEN&&env.CF_ZONE_ID&&env.CF_RECORD_ID&&env.CF_RECORD_NAME)}};
 }
 async function saveInstanceInfo(env,input) {
   if(!input||!safe(input.id)||!Object.hasOwn(input,'expected_etag')||(input.expected_etag!==null&&typeof input.expected_etag!=='string')||typeof input.name!=='string'||typeof input.public_ip!=='string'||Object.keys(input).some(k=>!['id','name','public_ip','expected_etag'].includes(k)))throw new Fault(400,'实例信息字段无效');

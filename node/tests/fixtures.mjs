@@ -99,15 +99,19 @@ case "$*" in
 esac
 `);
   shell(join(work,'mock/curl'),`
-method=GET;output=;headers=;upload=;url=;condition=
+method=GET;output=;headers=;upload=;url=;condition=;payload_hash=
 while (($#));do case "$1" in
  --output) output=$2;shift 2;;--dump-header) headers=$2;shift 2;;--upload-file) upload=$2;shift 2;;--request) method=$2;shift 2;;--head) method=HEAD;shift;;
- --header) case "$2" in If-*) condition=$2;;esac;shift 2;;
+ --header) case "$2" in If-*) condition=$2;;x-amz-content-sha256:*) payload_hash=\${2#*: };;esac;shift 2;;
  --config|--proto|--connect-timeout|--max-time|--retry|--retry-delay|--write-out|--max-filesize) shift 2;;
  https://*) url=$1;shift;;*) shift;;esac;done
 [[ "$url" == 'https://fixture.r2.cloudflarestorage.com/control/'* ]] || { echo 'Unexpected non-R2 network request' >&2;exit 99; }
 key=\${url#https://fixture.r2.cloudflarestorage.com/control/};file="$TEST_ROOT/bucket/$key"
 echo "$method $key" >>"$TEST_ROOT/s3-trace"
+# R2 requires a payload hash even for bodyless requests. Older curl versions
+# sign those requests without adding the header, so the caller must supply it.
+expected_hash=$(sha256sum "\${upload:-/dev/null}"|cut -d' ' -f1)
+[[ "$payload_hash" == "$expected_hash" ]] || { printf 400;exit; }
 if [[ "$method" == PUT ]];then
  if [[ "$condition" == 'If-None-Match: *' && -f "$file" ]];then printf 412;exit;fi
  if [[ "$condition" == 'If-Match: '* ]];then
