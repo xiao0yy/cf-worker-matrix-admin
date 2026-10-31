@@ -79,6 +79,17 @@ function element(tag, className, value) {
   if (value !== undefined) node.textContent = value;
   return node;
 }
+function icon(name) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  node.setAttribute("class", "icon");
+  node.setAttribute("viewBox", "0 0 24 24");
+  node.setAttribute("fill", "none");
+  node.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", "#icon-" + name);
+  node.append(use);
+  return node;
+}
 function badge(value, tone) {
   return element("span", "badge " + tone, value);
 }
@@ -218,6 +229,13 @@ function health() {
     ];
   const c = snapshot.control,
     owner = findInstance(c.owner);
+  if (!snapshot.instances.length)
+    return [
+      "尚无实例",
+      "等待实例接入",
+      "在服务器准备实例并启动轮询后，这里会显示服务状态。",
+      "neutral",
+    ];
   const unexpected = snapshot.instances.some(
     (i) =>
       fresh(i) &&
@@ -298,9 +316,17 @@ function renderOverview() {
     "owner-name",
     owner
       ? instanceName(owner)
-      : snapshot?.control.owner || (snapshot ? "归属已释放，等待接管" : "—"),
+      : snapshot?.control.owner ||
+          (snapshot?.control.phase === "RELEASED"
+            ? "归属已释放，等待接管"
+            : snapshot
+              ? "暂无服务归属"
+              : "—"),
   );
   text("owner-ip", owner?.info?.public_ip || (owner ? "未登记公网 IP" : ""));
+  text("owner-seen", owner ? ago(owner.report?.reported_at) : "尚未上报");
+  text("owner-version", owner?.agent?.software?.version || "尚未上报");
+  $("owner-details").disabled = !owner;
   const source = backupSource(),
     backup = source?.agent?.backup_observation;
   text("backup-age", backup ? ago(backup.data_time) : "暂无备份记录");
@@ -309,6 +335,9 @@ function renderOverview() {
     backup ? "数据截至 " + time(backup.data_time) : "等待实例上报已完成的备份",
   );
   text("backup-verification", backupVerification(backup));
+  document.querySelector(".backup-summary").dataset.verified = String(
+    ["database-tree", "full-restore"].includes(backup?.verification),
+  );
   text(
     "backup-description",
     backup
@@ -332,7 +361,7 @@ function renderOverview() {
               (phaseNames[snapshot.control.phase] || snapshot.control.phase)
           : `${warnings.length} 台实例需要检查。过期报告不能用来判断实例已停机。`,
       ),
-      button(changing ? "查看切换 →" : "查看详情 →", () =>
+      button(changing ? "查看切换" : "查看详情", () =>
         changing ? navigate("switch") : openInstance(warnings[0].id),
       ),
     );
@@ -341,13 +370,12 @@ function renderOverview() {
   const rows = (snapshot?.instances || []).map((i) => {
     const row = element("div", "instance-row"),
       machine = element("div", "machine");
-    machine.append(
-      element(
-        "span",
-        "machine-symbol" + (i.id === snapshot.control.owner ? " active" : ""),
-        "▤",
-      ),
+    const symbol = element(
+      "span",
+      "machine-symbol" + (i.id === snapshot.control.owner ? " active" : ""),
     );
+    symbol.append(icon("server"));
+    machine.append(symbol);
     const copy = element("div"),
       name = button(instanceName(i), () => openInstance(i.id), "machine-name");
     name.dataset.focusKey = i.id;
@@ -365,18 +393,16 @@ function renderOverview() {
     status.append(badge(state, color));
     const seen = element("div", "machine-seen", ago(i.report?.reported_at));
     seen.title = time(i.report?.reported_at);
-    seen.append(
-      element(
-        "small",
-        "",
-        i.agent?.software?.version
-          ? "v" + String(i.agent.software.version).replace(/^v/, "")
-          : "版本未上报",
-      ),
+    const version = element(
+      "div",
+      "machine-version",
+      i.agent?.software?.version
+        ? "v" + String(i.agent.software.version).replace(/^v/, "")
+        : "未上报",
     );
     const detail = button("详情", () => openInstance(i.id));
     detail.dataset.focusKey = i.id + "-detail";
-    row.append(machine, status, seen, detail);
+    row.append(machine, status, version, seen, detail);
     return row;
   });
   replaceContent(
@@ -569,6 +595,7 @@ function navigate(page) {
   if (location.hash !== "#" + page) history.replaceState(null, "", "#" + page);
   $(page + "-title").focus({ preventScroll: true });
   if (page === "switch") renderSwitch();
+  syncHandoverVisibility();
 }
 
 function commandBlocker(i) {
@@ -613,52 +640,34 @@ function switchBlocker(i) {
   return "";
 }
 function renderSwitch() {
-  const c = snapshot?.control,
-    active = c && c.phase !== "ONLINE";
-  $("switch-active").hidden = !active;
-  $("switch-wizard").hidden = !!active;
+  const c = snapshot?.control;
+  const model = window.Handover.derive(snapshot, currentStatus());
+  const active =
+    !!model && (c.phase !== "ONLINE" || dismissedHandover !== model.id);
+  const demo = !$("handover-demo").hidden;
+  $("switch-active").hidden = !active || demo;
+  $("switch-wizard").hidden = active || demo;
   if (active) {
-    const op = c.operation;
-    text("progress-title", phaseNames[c.phase] || c.phase);
-    text(
-      "progress-description",
-      op
-        ? `${instanceName(findInstance(op.source) || { id: op.source })} → ${instanceName(findInstance(op.target) || { id: op.target })}`
-        : "正在等待交接信息",
-    );
-    const steps = [
-      "停写与最终备份",
-      "释放旧实例归属",
-      "恢复与校验数据",
-      "启动新实例",
-      "确认上线",
-    ];
-    const index =
-      {
-        REQUESTED: 0,
-        QUIESCING: 0,
-        QUIESCED: 0,
-        SNAPSHOTTING: 0,
-        RELEASED: 1,
-        RESTORING: 2,
-        VALIDATING: 2,
-        STARTING: 3,
-      }[c.phase] ?? 0;
-    $("progress-steps").replaceChildren(
-      ...steps.map((s, n) => {
-        const item = element("li", n < index ? "complete" : "", s);
-        item.dataset.number = String(n + 1);
-        if (n === index) item.setAttribute("aria-current", "step");
-        return item;
-      }),
-    );
+    liveHandover.render(model);
+    $("handover-new").hidden = model.mode !== "complete";
     text(
       "progress-note",
-      currentStatus()
-        ? "只有归属切换完成且新实例报告正在服务，才会显示上线。"
-        : "当前是上次观测，尚未获得最新进度。",
+      model.mode === "complete"
+        ? "已确认目标上线；旧实例的数据仍保留。"
+        : "页面只展示观测状态，关闭页面不会中止交接。",
     );
   }
+  if (c && c.phase !== "ONLINE" && !model) {
+    $("switch-wizard").hidden = true;
+    $("switch-active").hidden = demo;
+    text(
+      "progress-note",
+      "当前不是可识别的实例交接记录，请在运维工具查看完整状态。",
+    );
+    $("handover-live-view").hidden = true;
+    $("handover-new").hidden = true;
+  } else $("handover-live-view").hidden = false;
+  syncHandoverVisibility();
   text(
     "switch-source",
     "当前服务实例：" +
@@ -721,6 +730,64 @@ function renderSwitch() {
   }
   updateSwitchSubmit();
 }
+let dismissedHandover = "",
+  demoTimer = null,
+  demoPlaying = false;
+const liveHandover = window.Handover.create($("handover-live-view"));
+const demoHandover = window.Handover.create($("handover-demo-view"));
+const demoSequence = [
+  "REQUESTED",
+  "QUIESCING",
+  "QUIESCED",
+  "SNAPSHOTTING",
+  "READY",
+  "RELEASED",
+  "RESTORING",
+  "VALIDATING",
+  "STARTING",
+  "ONLINE",
+];
+function stopDemo() {
+  if (demoTimer !== null) clearTimeout(demoTimer);
+  demoTimer = null;
+  demoPlaying = false;
+  text("handover-demo-play", "播放全过程");
+}
+function syncHandoverVisibility() {
+  const visible = !$("page-switch").hidden && !document.hidden;
+  liveHandover.setVisible(visible && !$("switch-active").hidden);
+  demoHandover.setVisible(visible && !$("handover-demo").hidden);
+  if (!visible) stopDemo();
+}
+function renderDemo() {
+  demoHandover.render(
+    window.Handover.demonstration($("handover-demo-phase").value),
+  );
+  syncHandoverVisibility();
+}
+function playDemo() {
+  if (demoPlaying) {
+    stopDemo();
+    return;
+  }
+  demoPlaying = true;
+  text("handover-demo-play", "暂停演示");
+  let index = demoSequence.indexOf($("handover-demo-phase").value);
+  if (index < 0 || index === demoSequence.length - 1) index = 0;
+  const step = () => {
+    if (!demoPlaying) return;
+    $("handover-demo-phase").value = demoSequence[index];
+    renderDemo();
+    if (index === demoSequence.length - 1) {
+      stopDemo();
+      return;
+    }
+    index++;
+    demoTimer = setTimeout(step, 2400);
+  };
+  step();
+}
+
 function resetReview() {
   reviewContext = null;
   $("route").checked = false;
@@ -826,6 +893,9 @@ async function submitSwitch() {
 }
 function renderTools() {
   const i = selected();
+  $("tool-target-status").replaceChildren(
+    i ? badge(...role(i)) : element("span", "small muted", "等待实例上报"),
+  );
   for (const node of document.querySelectorAll("[data-action]")) {
     let why = commandBlocker(i);
     const action = node.dataset.action;
@@ -1018,12 +1088,24 @@ async function retryCommand() {
     notice("这条原指令已过期。请先核对回执，不会自动创建新指令。", true);
     return;
   }
+  const original = lastCommand;
   if (
-    confirm(
-      `重发原指令 ${lastCommand.id}？目标：${instanceLabel(findInstance(lastCommand.target) || { id: lastCommand.target })}。不会创建新编号或改变原内容。`,
+    await confirmRequest(
+      "重发这条原指令？",
+      `目标：${instanceName(findInstance(original.target) || { id: original.target })}\n将沿用同一编号和完整内容，不会创建新的操作。\n指令编号：${original.id}`,
+      "重发原指令",
     )
-  )
-    await send(lastCommand);
+  ) {
+    if (
+      inFlight ||
+      loginExpired ||
+      Date.parse(original.expires_at) <= Date.now()
+    ) {
+      notice("原指令已过期或当前不可提交，请刷新核对回执。", true);
+      return;
+    }
+    await send(original);
+  }
 }
 async function abandonCommand() {
   const i = selected(),
@@ -1037,11 +1119,23 @@ async function abandonCommand() {
   )
     return;
   if (
-    !confirm(
-      `关闭 ${instanceName(i)} 的过期未认领指令 ${pending.id}？不会改变服务归属。`,
-    )
+    !(await confirmRequest(
+      "关闭过期指令？",
+      `${instanceName(i)} 的这条指令尚未收到认领回执。关闭它不会更改服务归属。\n指令编号：${pending.id}`,
+      "关闭指令",
+    ))
   )
     return;
+  const latest = findInstance(i.id);
+  if (
+    !currentStatus() ||
+    latest?.pending?.id !== pending.id ||
+    latest.result ||
+    inFlight
+  ) {
+    notice("指令状态已变化，请刷新后核对。", true);
+    return;
+  }
   inFlight = true;
   let failure = "";
   try {
@@ -1240,9 +1334,11 @@ async function writeDNS() {
   if (dnsBusy || !dnsRecord) return;
   const ip = $("ip").value.trim();
   if (
-    !confirm(
-      `将 ${dnsRecord.name} 的回源 IP 从 ${dnsRecord.content} 改为 ${ip}？此操作不会自动发起服务切换。`,
-    )
+    !(await confirmRequest(
+      "修改回源地址？",
+      `${dnsRecord.name}\n当前地址：${dnsRecord.content}\n目标地址：${ip}\n这一步只修改 DNS；完成后仍需提交实例交接。`,
+      "修改回源 IP",
+    ))
   )
     return;
   dnsBusy = true;
@@ -1267,6 +1363,42 @@ async function writeDNS() {
   }
 }
 
+let confirmationResolve = null;
+function confirmRequest(title, description, accept) {
+  if (confirmationResolve) return Promise.resolve(false);
+  text("confirm-title", title);
+  text("confirm-description", description);
+  text("confirm-accept", accept);
+  $("confirm-dialog").showModal();
+  $("confirm-cancel").focus();
+  return new Promise((resolve) => {
+    confirmationResolve = resolve;
+  });
+}
+function resolveConfirmation(accepted) {
+  const resolve = confirmationResolve;
+  confirmationResolve = null;
+  $("confirm-dialog").close();
+  resolve?.(accepted);
+}
+$("confirm-accept").onclick = () => resolveConfirmation(true);
+$("confirm-cancel").onclick = $("confirm-close").onclick = () =>
+  resolveConfirmation(false);
+$("confirm-dialog").addEventListener("cancel", (e) => {
+  e.preventDefault();
+  resolveConfirmation(false);
+});
+
+async function runProbe() {
+  const i = selected(),
+    blocked = commandBlocker(i);
+  if (blocked) {
+    notice(blocked, true);
+    return;
+  }
+  await send(makeCommand(i, "probe"));
+}
+
 for (const node of document.querySelectorAll("[data-page]"))
   node.onclick = (e) => {
     e.preventDefault();
@@ -1276,15 +1408,54 @@ for (const node of document.querySelectorAll("[data-close]"))
   node.onclick = () => $(node.dataset.close).close();
 for (const node of document.querySelectorAll("[data-action]")) {
   node.dataset.description = node.querySelector("small").textContent;
-  node.onclick = () => openAction(node.dataset.action);
+  node.onclick = () =>
+    node.dataset.action === "probe"
+      ? runProbe()
+      : openAction(node.dataset.action);
 }
 window.addEventListener("hashchange", () => navigate(location.hash.slice(1)));
+$("skip-content").onclick = (e) => {
+  e.preventDefault();
+  $("main-content").focus();
+};
 $("refresh").onclick = () => {
   loginExpired = false;
   return refresh();
 };
 $("start-switch").onclick = () => navigate("switch");
-$("progress-tools").onclick = () => navigate("tools");
+$("owner-details").onclick = () =>
+  snapshot?.control.owner && openInstance(snapshot.control.owner);
+$("progress-tools").onclick = () => {
+  const model = window.Handover.derive(snapshot, currentStatus());
+  if (model?.worker) $("target").value = model.worker;
+  renderTools();
+  navigate("tools");
+};
+$("handover-new").onclick = () => {
+  dismissedHandover = snapshot?.control.last_completed?.id || "";
+  resetReview();
+  renderSwitch();
+};
+$("handover-demo-open").onclick = () => {
+  stopDemo();
+  $("handover-demo").hidden = false;
+  $("handover-demo-phase").value = "REQUESTED";
+  renderDemo();
+  renderSwitch();
+  $("handover-demo-play").focus();
+};
+$("handover-demo-close").onclick = () => {
+  stopDemo();
+  $("handover-demo").hidden = true;
+  renderSwitch();
+  $("handover-demo-open").focus();
+};
+$("handover-demo-phase").onchange = () => {
+  stopDemo();
+  renderDemo();
+};
+$("handover-demo-play").onclick = playDemo;
+document.addEventListener("visibilitychange", syncHandoverVisibility);
 $("switch-next").onclick = startReview;
 $("switch-back").onclick = () => {
   resetReview();

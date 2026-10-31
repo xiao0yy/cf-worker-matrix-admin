@@ -75,6 +75,10 @@ function browser(fetch = async () => Response.json({}), saved = null) {
       throw Error("file pages must not poll authenticated API");
     },
   });
+  vm.runInContext(
+    readFileSync(new URL("../web/handover.js", import.meta.url), "utf8"),
+    context,
+  );
   vm.runInContext(script, context);
   return context;
 }
@@ -265,7 +269,10 @@ test("switch command carries exact state and uncertain delivery retries the iden
   assert.match(writes[0].operation_id, /^move-/);
   assert.equal(evaluate(c, "reviewContext"), null);
   assert.equal(c.document.getElementById("receipt").hidden, false);
-  await evaluate(c, "retryCommand()");
+  const retry = evaluate(c, "retryCommand()");
+  assert.equal(writes.length, 1);
+  evaluate(c, '$("confirm-accept").onclick()');
+  await retry;
   assert.equal(writes.length, 2);
   assert.deepEqual(writes[0], writes[1]);
 });
@@ -419,4 +426,120 @@ test("losing Access during a write immediately marks the previous observation st
     /无法确认/,
   );
   assert.equal(c.document.getElementById("dns-open").disabled, true);
+});
+
+test("demo playback is isolated from the live wizard and does not call any API", () => {
+  let calls = 0;
+  const c = browser(async () => {
+    calls++;
+    return Response.json({});
+  });
+  setSnapshot(c);
+  evaluate(
+    c,
+    'navigate("switch");$("handover-demo-open").onclick();$("handover-demo-phase").value="SNAPSHOTTING";$("handover-demo-phase").onchange()',
+  );
+  assert.equal(c.document.getElementById("switch-wizard").hidden, true);
+  assert.equal(
+    c.document.querySelector("#handover-demo-view .handover-scene").dataset
+      .flow,
+    "upload",
+  );
+  assert.equal(calls, 0);
+  evaluate(c, '$("handover-demo-close").onclick()');
+  assert.equal(c.document.getElementById("switch-wizard").hidden, false);
+});
+
+test("identical status polls preserve topology nodes and animations", () => {
+  const c = browser(),
+    s = fixture();
+  s.control.phase = "SNAPSHOTTING";
+  s.control.operation = {
+    id: "move-test",
+    mode: "planned",
+    source: "node-a",
+    target: "node-b",
+    source_epoch: 1,
+    next_epoch: 2,
+    phase: "SNAPSHOTTING",
+  };
+  s.instances[0].report.serving = false;
+  setSnapshot(c, s);
+  const before = c.document.querySelector(
+    "#handover-live-view .ownership-marker",
+  );
+  evaluate(c, "render()");
+  assert.equal(
+    c.document.querySelector("#handover-live-view .ownership-marker"),
+    before,
+  );
+  assert.equal(
+    c.document.querySelectorAll("#handover-live-view .handover-stages li")
+      .length,
+    7,
+  );
+});
+
+test("confirmation can be cancelled without submitting and retains protected focus", async () => {
+  let writes = 0;
+  const c = browser(async () => {
+    writes++;
+    return Response.json({});
+  });
+  setSnapshot(c);
+  evaluate(c, 'lastCommand=makeCommand(findInstance("node-a"),"probe")');
+  const pending = evaluate(c, "retryCommand()");
+  assert.equal(c.document.getElementById("confirm-dialog").open, true);
+  assert.equal(c.document.activeElement.id, "confirm-cancel");
+  evaluate(c, '$("confirm-cancel").onclick()');
+  await pending;
+  assert.equal(writes, 0);
+  assert.equal(c.document.getElementById("confirm-dialog").open, false);
+});
+
+test("connection check sends only a probe while service interventions still require confirmation", async () => {
+  const writes = [],
+    state = fixture();
+  const c = browser(async (path, options) => {
+    if (path === "/api/status") return Response.json(state);
+    writes.push(JSON.parse(options.body));
+    return Response.json({ submitted: true });
+  });
+  setSnapshot(c);
+  await evaluate(c, 'document.querySelector("[data-action=probe]").onclick()');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].action, "probe");
+  assert.equal(writes[0].target, "node-a");
+  evaluate(c, 'document.querySelector("[data-action=fence-local]").onclick()');
+  assert.equal(c.document.getElementById("action-dialog").open, true);
+  assert.equal(c.document.getElementById("action-submit").disabled, true);
+  assert.equal(writes.length, 1);
+});
+
+test("empty clusters explain setup instead of inventing an expired report or completed release", () => {
+  const c = browser(),
+    state = fixture();
+  state.instances = [];
+  state.control.owner = "";
+  setSnapshot(c, state);
+  assert.equal(
+    c.document.getElementById("health-title").textContent,
+    "等待实例接入",
+  );
+  assert.equal(
+    c.document.getElementById("owner-name").textContent,
+    "暂无服务归属",
+  );
+  assert.equal(c.document.getElementById("switch-next").disabled, true);
+});
+
+test("skip navigation keeps the selected page and focuses main content", () => {
+  const c = browser();
+  evaluate(
+    c,
+    'navigate("tools");$("skip-content").onclick({preventDefault(){}})',
+  );
+  assert.equal(c.document.getElementById("page-tools").hidden, false);
+  assert.equal(c.document.activeElement.id, "main-content");
+  assert.equal(c.location.hash, "#tools");
 });

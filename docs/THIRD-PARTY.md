@@ -10,6 +10,18 @@ Worker-only npm dependencies are listed in package-lock.json and distributed
 under their respective licenses; they are not bundled into the node runtime.
 Application images are separate registry dependencies, not part of this package.
 
+## Console display font
+
+The web console bundles a renamed, static 600-weight subset of Noto Sans SC,
+under the SIL Open Font License 1.1. The full license is in
+`web/fonts/OFL.txt`; pinned upstream provenance, included code points, tool
+versions and SHA-256 are in `web/fonts/SOURCE.json`.
+
+The subset is served from the same origin and covers UI text and Latin.
+Names or future headings outside that character set use system fallback.
+See `docs/fonts.md` to regenerate the font; normal builds use the checked-in
+WOFF2 and require no font toolchain.
+
 ## restic
 
 BSD 2-Clause License

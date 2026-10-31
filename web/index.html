@@ -6,115 +6,306 @@
     <meta name="referrer" content="no-referrer" />
     <meta name="color-scheme" content="light" />
     <title>Matrix · 集群管理</title>
+    <link
+      rel="preload"
+      href="fonts/matrix-admin-display.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="handover.css" />
   </head>
   <body>
-    <aside class="sidebar">
-      <a class="brand" href="#overview" aria-label="Matrix 总览"
-        ><span class="brand-mark" aria-hidden="true">m<span>·</span></span
-        ><span>Matrix<span class="brand-caption">集群管理</span></span></a
-      >
-      <div class="nav-label">工作空间</div>
-      <nav aria-label="主导航">
-        <a href="#overview" data-page="overview" aria-current="page"
-          ><span class="nav-icon" aria-hidden="true">◫</span>总览</a
-        >
-        <a href="#switch" data-page="switch"
-          ><span class="nav-icon" aria-hidden="true">⇄</span>切换实例</a
-        >
-        <a href="#tools" data-page="tools"
-          ><span class="nav-icon" aria-hidden="true">⚙</span>运维工具</a
-        >
-      </nav>
-      <div class="sidebar-foot">
-        <span class="access-dot"></span>Cloudflare Access<span
-          >身份保护已启用</span
-        >
+    <svg
+      class="icon-definitions"
+      aria-hidden="true"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <defs>
+        <symbol id="icon-grid" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="7" height="7" rx="1.5" />
+          <rect x="14" y="3" width="7" height="7" rx="1.5" />
+          <rect x="3" y="14" width="7" height="7" rx="1.5" />
+          <rect x="14" y="14" width="7" height="7" rx="1.5" />
+        </symbol>
+        <symbol id="icon-switch" viewBox="0 0 24 24">
+          <path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4" />
+        </symbol>
+        <symbol id="icon-sliders" viewBox="0 0 24 24">
+          <path d="M4 6h8m4 0h4M4 12h2m4 0h10M4 18h11m4 0h1" />
+          <circle cx="14" cy="6" r="2" />
+          <circle cx="8" cy="12" r="2" />
+          <circle cx="17" cy="18" r="2" />
+        </symbol>
+        <symbol id="icon-refresh" viewBox="0 0 24 24">
+          <path d="M20 7v5h-5M4 17v-5h5" />
+          <path d="M6 6a8 8 0 0 1 13 3M18 18A8 8 0 0 1 5 15" />
+        </symbol>
+        <symbol id="icon-server" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="18" rx="3" />
+          <path d="M3 12h18M7 7h5M7 17h5M17 7h.01M17 17h.01" />
+        </symbol>
+        <symbol id="icon-database" viewBox="0 0 24 24">
+          <ellipse cx="12" cy="5" rx="8" ry="3" />
+          <path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0" />
+        </symbol>
+        <symbol id="icon-arrow" viewBox="0 0 24 24">
+          <path d="M5 12h14m-5-5 5 5-5 5" />
+        </symbol>
+        <symbol id="icon-close" viewBox="0 0 24 24">
+          <path d="m6 6 12 12M6 18 18 6" />
+        </symbol>
+        <symbol id="icon-shield" viewBox="0 0 24 24">
+          <path d="m12 3 8 3v5c0 5-4 8-8 10-4-2-8-5-8-10V6z" />
+          <path d="m8 12 3 3 5-6" />
+        </symbol>
+        <symbol id="icon-check" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="icon-download" viewBox="0 0 24 24">
+          <path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" />
+        </symbol>
+        <symbol id="icon-chevron" viewBox="0 0 24 24">
+          <path d="m9 5 7 7-7 7" />
+        </symbol>
+        <symbol id="icon-play" viewBox="0 0 24 24">
+          <path d="m8 4 12 8-12 8z" />
+        </symbol>
+        <symbol id="icon-info" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 11v6M12 7h.01" />
+        </symbol>
+      </defs>
+    </svg>
+    <a id="skip-content" class="skip-link" href="#main-content">跳到主内容</a>
+    <header class="app-header">
+      <div class="app-header-inner">
+        <a class="brand" href="#overview" aria-label="Matrix 总览">
+          <svg
+            class="brand-mark"
+            viewBox="0 0 32 32"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path d="M5 24V8l11 10L27 8v16" />
+            <path d="M5 8h5m12 0h5" />
+          </svg>
+          <span>Matrix<span class="brand-caption">Admin</span></span>
+        </a>
+        <nav aria-label="主导航">
+          <a href="#overview" data-page="overview" aria-current="page"
+            ><svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-grid" /></svg
+            ><span>总览</span></a
+          >
+          <a href="#switch" data-page="switch"
+            ><svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-switch" /></svg
+            ><span>切换实例</span></a
+          >
+          <a href="#tools" data-page="tools"
+            ><svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-sliders" /></svg
+            ><span>运维工具</span></a
+          >
+        </nav>
+        <div class="access-status" title="此控制台通过 Cloudflare Access 认证">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <use href="#icon-shield" /></svg
+          ><span>Access 保护</span>
+        </div>
       </div>
-    </aside>
-
-    <main>
+    </header>
+    <main id="main-content" tabindex="-1">
       <div class="topbar">
-        <span>个人服务 / <strong id="page-label">总览</strong></span>
+        <span class="breadcrumb"
+          >个人集群
+          <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <use href="#icon-chevron" />
+          </svg>
+          <strong id="page-label">总览</strong></span
+        >
         <div class="topbar-actions">
           <span id="updated">尚未读取状态</span
-          ><button id="refresh" class="button-quiet">
-            ↻ <span>刷新</span>
+          ><button id="refresh" class="button-quiet" aria-label="刷新状态">
+            <svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-refresh" /></svg
+            ><span>刷新</span>
           </button>
         </div>
       </div>
       <div id="notice" class="notice" role="status" hidden></div>
-      <a id="login-link" class="login-link" href="/" hidden>重新登录 →</a>
+      <a id="login-link" class="login-link" href="/" hidden>重新登录</a>
 
       <section id="page-overview" class="page" aria-labelledby="overview-title">
         <header class="page-heading">
           <div>
-            <p class="eyebrow">OVERVIEW</p>
-            <h1 id="overview-title" tabindex="-1">集群总览</h1>
-            <p>服务在哪里运行，数据备份到了哪里。</p>
+            <h1 id="overview-title" tabindex="-1">服务总览</h1>
+            <p>服务归属、恢复准备，一目了然。</p>
           </div>
           <button id="start-switch" class="button-primary">
-            切换实例 <span aria-hidden="true">→</span>
+            <svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-switch" /></svg
+            >切换实例
           </button>
         </header>
-        <section class="service-card" aria-label="服务与备份摘要">
-          <div class="service-main">
-            <span id="health-badge" class="badge neutral">正在读取</span>
-            <h2 id="health-title">连接你的集群</h2>
-            <p id="health-description">读取服务状态与实例报告…</p>
-            <div class="service-location">
-              <span class="server-icon" aria-hidden="true">▤</span>
-              <div>
-                <span class="field-caption">当前服务实例</span
-                ><strong id="owner-name">—</strong
-                ><span id="owner-ip" class="mono muted">—</span>
+        <div id="attention" class="attention" hidden></div>
+        <div class="overview-workspace">
+          <section class="service-card" aria-label="服务状态">
+            <div class="service-main">
+              <div class="service-heading">
+                <h2 id="health-title">连接你的集群</h2>
+                <span id="health-badge" class="badge neutral">正在读取</span>
+              </div>
+              <p id="health-description">读取服务状态与实例报告…</p>
+              <div class="service-location">
+                <div class="service-glyph" aria-hidden="true">
+                  <svg
+                    class="icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <use href="#icon-server" />
+                  </svg>
+                </div>
+                <div class="service-identity">
+                  <span class="field-caption">当前服务实例</span
+                  ><strong id="owner-name">—</strong
+                  ><span id="owner-ip" class="mono muted">—</span>
+                </div>
+                <button
+                  id="owner-details"
+                  class="icon-button"
+                  aria-label="查看当前实例详情"
+                  disabled
+                >
+                  <svg
+                    class="icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <use href="#icon-arrow" />
+                  </svg>
+                </button>
+              </div>
+              <div class="service-metadata">
+                <div>
+                  <span>最近报告</span><strong id="owner-seen">—</strong>
+                </div>
+                <div>
+                  <span>运行版本</span><strong id="owner-version">—</strong>
+                </div>
+                <div><span>运行方式</span><strong>单实例服务</strong></div>
               </div>
             </div>
-          </div>
-          <div class="backup-summary">
-            <div class="section-kicker">
-              <span class="small-square" aria-hidden="true">↗</span>最近备份
+          </section>
+          <aside class="backup-summary" aria-label="最近备份">
+            <div class="backup-heading">
+              <h2>恢复准备</h2>
+              <svg
+                class="icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
+                <use href="#icon-database" />
+              </svg>
             </div>
+            <p class="field-caption">最近备份的数据时间</p>
             <div id="backup-age" class="backup-age">—</div>
             <p id="backup-time">等待实例上报</p>
-            <div id="backup-verification" class="verification">
-              尚无校验信息
+            <div class="backup-evidence">
+              <span class="verification-mark" aria-hidden="true"
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-check" /></svg></span
+              ><span id="backup-verification">尚无校验信息</span>
             </div>
             <p id="backup-description" class="small muted">
               备份状态由实例定期上报。
             </p>
             <button id="backup-details" class="text-button" disabled>
-              查看备份详情 <span aria-hidden="true">↗</span>
+              查看备份详情
+              <svg
+                class="icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
+                <use href="#icon-arrow" />
+              </svg>
             </button>
-          </div>
-        </section>
-        <div id="attention" class="attention" hidden></div>
+          </aside>
+        </div>
         <section class="fleet-section" aria-labelledby="fleet-title">
           <div class="section-heading">
             <div>
               <h2 id="fleet-title">
                 实例 <span id="instance-count" class="count">—</span>
               </h2>
-              <p>当前服务与备用机器</p>
+              <p>运行与待命的机器，都在这里。</p>
             </div>
-            <span class="small muted">状态每 15 秒刷新</span>
+            <span class="refresh-hint"
+              ><span aria-hidden="true"></span>每 15 秒更新</span
+            >
           </div>
-          <div class="fleet-labels" aria-hidden="true">
-            <span>机器</span><span>服务状态</span><span>最近报告</span
-            ><span></span>
-          </div>
-          <div id="instances" class="fleet">
-            <div class="empty-state">正在读取实例…</div>
+          <div class="fleet-register">
+            <div class="fleet-labels" aria-hidden="true">
+              <span>实例名称 / 公网 IP</span><span>状态</span><span>版本</span
+              ><span>最近报告</span><span></span>
+            </div>
+            <div id="instances" class="fleet">
+              <div class="empty-state">正在读取实例…</div>
+            </div>
           </div>
         </section>
         <section class="activity-section" aria-labelledby="activity-title">
           <div class="section-heading">
             <div>
               <h2 id="activity-title">最近指令</h2>
-              <p>查看管理操作是否已被实例接收</p>
+              <p>跟踪指令是否被接收、处理。</p>
             </div>
             <button id="overview-diagnostic" class="text-button">
-              导出诊断 ↗
+              <svg
+                class="icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
+                <use href="#icon-download" /></svg
+              >导出诊断
             </button>
           </div>
           <div id="activity" class="activity-list">
@@ -131,98 +322,177 @@
       >
         <header class="page-heading">
           <div>
-            <p class="eyebrow">HANDOVER</p>
             <h1 id="switch-title" tabindex="-1">切换实例</h1>
             <p>先完成旧实例的最终备份，再让新实例接管服务。</p>
           </div>
-        </header>
-        <div id="switch-active" class="panel" hidden>
-          <span class="badge info">正在交接</span>
-          <h2 id="progress-title">切换进行中</h2>
-          <p id="progress-description"></p>
-          <ol id="progress-steps" class="progress-steps"></ol>
-          <p id="progress-note" class="small muted"></p>
-          <button id="progress-tools" class="button-secondary">
-            查看处理选项
+          <button id="handover-demo-open" class="button-secondary">
+            <svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-play" /></svg
+            >预览切换过程
           </button>
-        </div>
-        <div id="switch-wizard">
-          <ol class="wizard-steps" aria-label="切换步骤">
-            <li id="wizard-step-one" aria-current="step">
-              <span>1</span>选择目标实例
-            </li>
-            <li id="wizard-step-two"><span>2</span>调整入口并确认</li>
-            <li><span>3</span>备份与接管</li>
-          </ol>
-          <div id="switch-choose" class="panel">
-            <div class="panel-heading">
-              <h2>服务要迁移到哪台机器？</h2>
-              <p id="switch-source">当前服务实例：—</p>
+        </header>
+        <section
+          id="handover-demo"
+          class="handover-preview"
+          aria-label="切换动效演示"
+          hidden
+        >
+          <div class="demo-bar">
+            <div>
+              <strong>动效演示</strong><span>示例数据，不会操作任何实例</span>
             </div>
-            <div id="switch-targets" class="target-list"></div>
-            <p id="switch-blocker" class="small muted"></p>
-            <div class="panel-footer">
-              <p>切换期间服务会暂时不可用。</p>
-              <button id="switch-next" class="button-primary" disabled>
-                下一步 <span aria-hidden="true">→</span>
+            <button id="handover-demo-close" class="button-quiet">
+              退出演示
+            </button>
+          </div>
+          <div class="demo-controls">
+            <label for="handover-demo-phase">预览阶段</label
+            ><select id="handover-demo-phase">
+              <option value="REQUESTED">请求交接</option>
+              <option value="QUIESCING">停止写入</option>
+              <option value="QUIESCED">数据冻结</option>
+              <option value="SNAPSHOTTING">最终备份</option>
+              <option value="READY">备份就绪</option>
+              <option value="RELEASED">释放归属</option>
+              <option value="RESTORING">目标认领</option>
+              <option value="VALIDATING">恢复与校验</option>
+              <option value="STARTING">启动服务</option>
+              <option value="ONLINE">完成切换</option>
+              <option value="ERROR">校验失败</option>
+              <option value="STALE">报告过期</option></select
+            ><button id="handover-demo-play" class="button-secondary">
+              播放全过程
+            </button>
+          </div>
+          <div id="handover-demo-view"></div>
+        </section>
+        <section id="switch-active" aria-label="实例交接状态" hidden>
+          <div id="handover-live-view"></div>
+          <div class="handover-actions">
+            <p id="progress-note" class="small muted"></p>
+            <div>
+              <button id="progress-tools" class="button-secondary">
+                查看处理选项</button
+              ><button id="handover-new" class="button-primary" hidden>
+                准备下一次切换
               </button>
             </div>
           </div>
-          <div id="switch-review" class="panel" hidden>
-            <div class="panel-heading">
-              <h2>确认入口与切换目标</h2>
-              <p>此时新实例仍在等待；提交后才会开始交接。</p>
+        </section>
+        <div id="switch-wizard" class="switch-workspace">
+          <aside class="switch-guide">
+            <h2>有序交接，保留数据</h2>
+            <p>一次只让一台实例提供服务。先选目标，再核对入口。</p>
+            <ol class="wizard-steps" aria-label="切换步骤">
+              <li id="wizard-step-one" aria-current="step">
+                <span>1</span>选择目标实例
+              </li>
+              <li id="wizard-step-two"><span>2</span>调整入口并确认</li>
+              <li><span>3</span>备份与接管</li>
+            </ol>
+            <div class="guide-note">
+              <svg
+                class="icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
+                <use href="#icon-info" />
+              </svg>
+              <p>切换期间服务会暂停。最终备份校验通过后，目标才会开始恢复。</p>
             </div>
-            <div class="transfer">
-              <div>
-                <span class="field-caption">当前实例</span
-                ><strong id="review-source"></strong>
+          </aside>
+          <div class="switch-form">
+            <div id="switch-choose" class="panel">
+              <div class="panel-heading">
+                <h2>服务要迁移到哪台机器？</h2>
+                <p id="switch-source">当前服务实例：—</p>
               </div>
-              <span aria-hidden="true">→</span>
-              <div>
-                <span class="field-caption">目标实例</span
-                ><strong id="review-target"></strong
-                ><span id="review-ip" class="mono muted"></span>
-              </div>
-            </div>
-            <div class="instruction">
-              <span class="step-number">1</span>
-              <div>
-                <h3>先修改 Cloudflare 回源地址</h3>
-                <p>
-                  将 Matrix 入口的回源 IP 改成上方目标实例的公网
-                  IP，再继续。这里不会自动修改入口。
-                </p>
-                <button id="review-dns" class="text-button" hidden>
-                  管理已配置的 DNS 记录 ↗
+              <div id="switch-targets" class="target-list"></div>
+              <p id="switch-blocker" class="small muted"></p>
+              <div class="panel-footer">
+                <p>切换期间服务会暂时不可用。</p>
+                <button id="switch-next" class="button-primary" disabled>
+                  下一步
+                  <svg
+                    class="icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <use href="#icon-arrow" />
+                  </svg>
                 </button>
               </div>
             </div>
-            <label class="check"
-              ><input type="checkbox" id="route" />我已将 Cloudflare
-              入口指向此目标实例</label
-            >
-            <div class="instruction">
-              <span class="step-number">2</span>
-              <div>
-                <h3>旧实例会停写、备份并释放服务归属</h3>
-                <p>
-                  新实例恢复并校验数据后才会启动。网页关闭不影响已提交的交接。
-                </p>
+            <div id="switch-review" class="panel" hidden>
+              <div class="panel-heading">
+                <h2>确认入口与切换目标</h2>
+                <p>此时新实例仍在等待；提交后才会开始交接。</p>
               </div>
-            </div>
-            <label class="confirmation-label"
-              >输入“确认”开始切换<input
-                id="switch-confirm"
-                autocomplete="off"
-                placeholder="确认"
-            /></label>
-            <p id="review-error" class="form-message" role="status"></p>
-            <div class="panel-footer">
-              <button id="switch-back" class="button-quiet">← 返回选择</button
-              ><button id="switch-submit" class="button-primary" disabled>
-                开始切换
-              </button>
+              <div class="transfer">
+                <div>
+                  <span class="field-caption">当前实例</span
+                  ><strong id="review-source"></strong>
+                </div>
+                <svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg>
+                <div>
+                  <span class="field-caption">目标实例</span
+                  ><strong id="review-target"></strong
+                  ><span id="review-ip" class="mono muted"></span>
+                </div>
+              </div>
+              <div class="instruction">
+                <span class="step-number">1</span>
+                <div>
+                  <h3>先修改 Cloudflare 回源地址</h3>
+                  <p>
+                    将 Matrix 入口的回源 IP 改成上方目标实例的公网
+                    IP，再继续。这里不会自动修改入口。
+                  </p>
+                  <button id="review-dns" class="text-button" hidden>
+                    管理已配置的 DNS 记录
+                  </button>
+                </div>
+              </div>
+              <label class="check"
+                ><input type="checkbox" id="route" />我已将 Cloudflare
+                入口指向此目标实例</label
+              >
+              <div class="instruction">
+                <span class="step-number">2</span>
+                <div>
+                  <h3>旧实例会停写、备份并释放服务归属</h3>
+                  <p>
+                    新实例恢复并校验数据后才会启动。网页关闭不影响已提交的交接。
+                  </p>
+                </div>
+              </div>
+              <label class="confirmation-label"
+                >输入“确认”开始切换<input
+                  id="switch-confirm"
+                  autocomplete="off"
+                  placeholder="确认"
+              /></label>
+              <p id="review-error" class="form-message" role="status"></p>
+              <div class="panel-footer">
+                <button id="switch-back" class="button-quiet">返回选择</button
+                ><button id="switch-submit" class="button-primary" disabled>
+                  开始切换
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -236,89 +506,172 @@
       >
         <header class="page-heading">
           <div>
-            <p class="eyebrow">OPERATIONS</p>
             <h1 id="tools-title" tabindex="-1">运维工具</h1>
             <p>检查实例，或处理未完成的操作。</p>
           </div>
           <button id="diagnostic" class="button-secondary">导出诊断</button>
         </header>
         <div class="tool-target">
-          <label for="target">操作哪台实例</label
-          ><select id="target"></select>
+          <div class="tool-target-icon" aria-hidden="true">
+            <svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-server" />
+            </svg>
+          </div>
+          <div class="tool-target-select">
+            <label for="target">操作哪台实例</label
+            ><select id="target"></select>
+          </div>
+          <div id="tool-target-status" class="tool-target-status"></div>
         </div>
-        <div class="tool-grid">
-          <section class="panel">
+        <div class="tool-list">
+          <section class="tool-section">
             <div class="panel-heading">
               <h2>连接与识别</h2>
               <p>核对机器信息和指令通路。</p>
             </div>
-            <button class="action-row" data-action="probe">
-              <span
-                ><strong>检查指令通路</strong
-                ><small>发送一条检查指令，不启停服务</small></span
-              ><span aria-hidden="true">→</span></button
-            ><button id="edit-selected" class="action-row">
-              <span
-                ><strong>修改名称与 IP</strong
-                ><small>便于识别机器，不更改 DNS</small></span
-              ><span aria-hidden="true">→</span>
-            </button>
+            <div class="tool-actions">
+              <button class="action-row" data-action="probe">
+                <span
+                  ><strong>检查指令通路</strong
+                  ><small>发送一条检查指令，不启停服务</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg></button
+              ><button id="edit-selected" class="action-row">
+                <span
+                  ><strong>修改名称与 IP</strong
+                  ><small>便于识别机器，不更改 DNS</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg>
+              </button>
+            </div>
           </section>
-          <section class="panel">
+          <section class="tool-section">
             <div class="panel-heading">
               <h2>处理切换</h2>
               <p>沿用原有切换任务，不创建新的交接。</p>
             </div>
-            <button class="action-row" data-action="handover-resume">
-              <span
-                ><strong>继续目标实例切换</strong
-                ><small>从已有任务的进度继续</small></span
-              ><span aria-hidden="true">→</span></button
-            ><button class="action-row" data-action="handover-cancel">
-              <span
-                ><strong>取消目标实例请求</strong
-                ><small>源实例已认领时，需要先恢复源实例</small></span
-              ><span aria-hidden="true">→</span>
-            </button>
+            <div class="tool-actions">
+              <button class="action-row" data-action="handover-resume">
+                <span
+                  ><strong>继续目标实例切换</strong
+                  ><small>从已有任务的进度继续</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg></button
+              ><button class="action-row" data-action="handover-cancel">
+                <span
+                  ><strong>取消目标实例请求</strong
+                  ><small>源实例已认领时，需要先恢复源实例</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg>
+              </button>
+            </div>
           </section>
-          <section class="panel">
+          <section class="tool-section">
             <div class="panel-heading">
               <h2>服务干预</h2>
               <p>这些操作会影响所选实例的服务状态。</p>
             </div>
-            <button class="action-row" data-action="resume-local">
-              <span
-                ><strong>恢复当前归属实例</strong
-                ><small>仅限同一归属、同一代数据</small></span
-              ><span aria-hidden="true">→</span></button
-            ><button class="action-row" data-action="source-resume">
-              <span
-                ><strong>中止交接并恢复源实例</strong
-                ><small>仅限释放归属前；随后需把入口切回源实例</small></span
-              ><span aria-hidden="true">→</span></button
-            ><button class="action-row danger-text" data-action="fence-local">
-              <span
-                ><strong>停用实例</strong
-                ><small>关闭入口并停止该实例的服务</small></span
-              ><span aria-hidden="true">→</span>
-            </button>
+            <div class="tool-actions">
+              <button class="action-row" data-action="resume-local">
+                <span
+                  ><strong>恢复当前归属实例</strong
+                  ><small>仅限同一归属、同一代数据</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg></button
+              ><button class="action-row" data-action="source-resume">
+                <span
+                  ><strong>中止交接并恢复源实例</strong
+                  ><small>仅限释放归属前；随后需把入口切回源实例</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg></button
+              ><button class="action-row danger-text" data-action="fence-local">
+                <span
+                  ><strong>停用实例</strong
+                  ><small>关闭入口并停止该实例的服务</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg>
+              </button>
+            </div>
           </section>
-          <section class="panel">
+          <section class="tool-section">
             <div class="panel-heading">
               <h2>入口与指令</h2>
               <p>处理网络入口和未被执行的过期指令。</p>
             </div>
-            <button id="dns-open" class="action-row">
-              <span
-                ><strong>Cloudflare DNS</strong
-                ><small id="dns-capability">正在读取配置状态</small></span
-              ><span aria-hidden="true">→</span></button
-            ><button id="abandon" class="action-row">
-              <span
-                ><strong>关闭过期未认领指令</strong
-                ><small id="abandon-description">先选择实例</small></span
-              ><span aria-hidden="true">→</span>
-            </button>
+            <div class="tool-actions">
+              <button id="dns-open" class="action-row">
+                <span
+                  ><strong>Cloudflare DNS</strong
+                  ><small id="dns-capability">正在读取配置状态</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg></button
+              ><button id="abandon" class="action-row">
+                <span
+                  ><strong>关闭过期未认领指令</strong
+                  ><small id="abandon-description">先选择实例</small></span
+                ><svg
+                  class="icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <use href="#icon-arrow" />
+                </svg>
+              </button>
+            </div>
           </section>
         </div>
         <p class="tools-limit">
@@ -344,7 +697,14 @@
             class="button-quiet"
             aria-label="收起指令反馈"
           >
-            ×
+            <svg
+              class="icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <use href="#icon-close" />
+            </svg>
           </button>
         </div>
         <h3 id="receipt-title"></h3>
@@ -359,14 +719,18 @@
         </details>
       </section>
       <footer>
-        Matrix Admin<span>运行状态来自实例报告 · 不依赖当前浏览器持续运行</span>
+        <span>Matrix Admin</span
+        ><span>状态来自实例报告 · 关闭网页不影响服务</span>
       </footer>
     </main>
 
-    <dialog id="instance-dialog" aria-labelledby="instance-dialog-title">
+    <dialog
+      class="drawer"
+      id="instance-dialog"
+      aria-labelledby="instance-dialog-title"
+    >
       <div class="dialog-heading">
         <div>
-          <p class="eyebrow">INSTANCE</p>
           <h2 id="instance-dialog-title">实例详情</h2>
         </div>
         <button
@@ -374,7 +738,9 @@
           data-close="instance-dialog"
           aria-label="关闭实例详情"
         >
-          ×
+          <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <use href="#icon-close" />
+          </svg>
         </button>
       </div>
       <div id="instance-detail"></div>
@@ -397,10 +763,13 @@
         <p id="instance-info-result" role="status" class="form-message"></p>
       </details>
     </dialog>
-    <dialog id="backup-dialog" aria-labelledby="backup-dialog-title">
+    <dialog
+      class="drawer"
+      id="backup-dialog"
+      aria-labelledby="backup-dialog-title"
+    >
       <div class="dialog-heading">
         <div>
-          <p class="eyebrow">BACKUP</p>
           <h2 id="backup-dialog-title">最近备份详情</h2>
         </div>
         <button
@@ -408,7 +777,9 @@
           data-close="backup-dialog"
           aria-label="关闭备份详情"
         >
-          ×
+          <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <use href="#icon-close" />
+          </svg>
         </button>
       </div>
       <div id="backup-detail"></div>
@@ -416,7 +787,6 @@
     <dialog id="action-dialog" aria-labelledby="action-dialog-title">
       <div class="dialog-heading">
         <div>
-          <p class="eyebrow">CONFIRM ACTION</p>
           <h2 id="action-dialog-title">确认操作</h2>
         </div>
         <button
@@ -424,7 +794,9 @@
           data-close="action-dialog"
           aria-label="取消操作"
         >
-          ×
+          <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <use href="#icon-close" />
+          </svg>
         </button>
       </div>
       <p id="action-target" class="action-target"></p>
@@ -446,7 +818,6 @@
     <dialog id="dns-dialog" aria-labelledby="dns-dialog-title">
       <div class="dialog-heading">
         <div>
-          <p class="eyebrow">CLOUDFLARE</p>
           <h2 id="dns-dialog-title">DNS 入口</h2>
         </div>
         <button
@@ -454,7 +825,9 @@
           data-close="dns-dialog"
           aria-label="关闭 DNS 设置"
         >
-          ×
+          <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <use href="#icon-close" />
+          </svg>
         </button>
       </div>
       <p>仅修改预先配置的 A 记录。请确认它就是当前服务的回源入口。</p>
@@ -469,7 +842,132 @@
       </button>
       <p id="dns-message" class="form-message" role="status"></p>
     </dialog>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+      <div class="dialog-heading">
+        <h2 id="confirm-title">确认操作</h2>
+        <button class="icon-button" id="confirm-close" aria-label="取消操作">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <use href="#icon-close" />
+          </svg>
+        </button>
+      </div>
+      <p id="confirm-description"></p>
+      <div class="dialog-actions">
+        <button id="confirm-cancel" class="button-secondary">取消</button
+        ><button id="confirm-accept" class="button-primary">继续</button>
+      </div>
+    </dialog>
     <noscript>请启用 JavaScript 以查看状态和管理实例。</noscript>
+    <template id="handover-template">
+      <div class="handover-scene" data-motion="paused">
+        <div class="handover-status">
+          <span class="handover-signal" aria-hidden="true"></span
+          ><span data-field="state"></span
+          ><span data-field="stage-count" class="stage-count"></span
+          ><button data-pause class="text-button" aria-pressed="false">
+            暂停动效
+          </button>
+        </div>
+        <div class="handover-heading" aria-live="polite" aria-atomic="true">
+          <h2 data-field="title"></h2>
+          <p data-field="description"></p>
+        </div>
+        <div class="ownership-track">
+          <span class="ownership-label">服务归属</span>
+          <div class="ownership-lane">
+            <div class="ownership-marker">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="8" cy="9" r="4" />
+                <path d="m11 12 8 8m-3-3 3-3m-6 0 3-3" /></svg
+              ><span data-field="owner"></span>
+            </div>
+          </div>
+        </div>
+        <div class="handover-topology">
+          <div class="handover-node node-source">
+            <div class="node-visual">
+              <svg viewBox="0 0 80 80" fill="none" aria-hidden="true">
+                <rect x="13" y="15" width="54" height="50" rx="7" />
+                <path d="M13 40h54" />
+                <path class="server-lines" d="M25 27h18m-18 25h18" />
+                <circle class="server-light" cx="55" cy="27" r="2" />
+                <circle class="server-light" cx="55" cy="52" r="2" /></svg
+              ><span class="node-focus" aria-hidden="true"></span>
+            </div>
+            <p class="node-role">源实例</p>
+            <h3 data-field="source-name"></h3>
+            <p data-field="source-ip" class="node-ip"></p>
+            <p data-field="source-status" class="node-state"></p>
+          </div>
+          <div class="data-route route-upload" aria-hidden="true">
+            <svg viewBox="0 0 100 24" preserveAspectRatio="none">
+              <path class="route-base" d="M0 12H100" />
+              <path class="route-arrow" d="m91 7 6 5-6 5" />
+              <g class="flow-packet">
+                <rect x="0" y="9" width="12" height="6" rx="3" />
+              </g></svg
+            ><span>保存快照</span>
+          </div>
+          <div class="handover-node node-store">
+            <div class="node-visual">
+              <svg viewBox="0 0 80 80" fill="none" aria-hidden="true">
+                <ellipse cx="40" cy="20" rx="25" ry="9" />
+                <path
+                  d="M15 20v38c0 5 11 10 25 10s25-5 25-10V20M15 38c0 5 11 10 25 10s25-5 25-10"
+                />
+                <path class="store-scan" d="M23 34h34M23 53h34" /></svg
+              ><span class="node-focus" aria-hidden="true"></span>
+            </div>
+            <p class="node-role">远端备份</p>
+            <h3>B2 快照存储</h3>
+            <p class="node-ip">R2 记录恢复点与归属</p>
+            <p data-field="store-status" class="node-state"></p>
+          </div>
+          <div class="data-route route-restore" aria-hidden="true">
+            <svg viewBox="0 0 100 24" preserveAspectRatio="none">
+              <path class="route-base" d="M0 12H100" />
+              <path class="route-arrow" d="m91 7 6 5-6 5" />
+              <g class="flow-packet">
+                <rect x="0" y="9" width="12" height="6" rx="3" />
+              </g></svg
+            ><span>恢复快照</span>
+          </div>
+          <div class="handover-node node-target">
+            <div class="node-visual">
+              <svg viewBox="0 0 80 80" fill="none" aria-hidden="true">
+                <rect x="13" y="15" width="54" height="50" rx="7" />
+                <path d="M13 40h54" />
+                <path class="server-lines" d="M25 27h18m-18 25h18" />
+                <circle class="server-light" cx="55" cy="27" r="2" />
+                <circle class="server-light" cx="55" cy="52" r="2" /></svg
+              ><svg
+                class="online-seal"
+                viewBox="0 0 32 32"
+                fill="none"
+                aria-hidden="true"
+              >
+                <circle cx="16" cy="16" r="14" />
+                <path d="m9 16 5 5 9-10" /></svg
+              ><span class="node-focus" aria-hidden="true"></span>
+            </div>
+            <p class="node-role">目标实例</p>
+            <h3 data-field="target-name"></h3>
+            <p data-field="target-ip" class="node-ip"></p>
+            <p data-field="target-status" class="node-state"></p>
+          </div>
+        </div>
+        <ol class="handover-stages" aria-label="交接阶段"></ol>
+        <div class="handover-foot">
+          <span data-field="snapshot"></span
+          ><span>动效表示所处阶段，不代表传输进度</span>
+        </div>
+        <details class="technical">
+          <summary>交接记录</summary>
+          <pre data-field="detail"></pre>
+        </details>
+      </div>
+    </template>
+    <script src="handover.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

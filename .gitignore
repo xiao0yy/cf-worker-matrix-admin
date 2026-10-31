@@ -32,3 +32,9 @@ coverage/
 *.log
 *.tgz
 *.tar.gz
+# Local design exploration and browser evidence; durable design tokens stay tracked.
+.impeccable/questions/
+.impeccable/review/
+.impeccable/mocks/
+.impeccable/build/
+.impeccable/config.local.json
