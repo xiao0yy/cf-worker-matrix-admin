@@ -80,7 +80,8 @@ func fakeController(t *testing.T, e *Engine, s *Status, action func(string) erro
 				return
 			}
 		}
-		w.Write([]byte(`{}`))
+		// The real controller acknowledges successful actions asynchronously.
+		w.WriteHeader(http.StatusAccepted)
 	})}
 	go server.Serve(ln)
 	t.Cleanup(func() { server.Close() })
@@ -465,6 +466,68 @@ func TestResumeRejectsPendingUpdateBeforeUnfencing(t *testing.T) {
 	write(t, filepath.Join(e.Host.Root, "agent/pending-update.json"), `{}`)
 	if err := e.Resume(context.Background(), "node-a", 1); err == nil || !strings.Contains(err.Error(), "pending code update") {
 		t.Fatal(err)
+	}
+}
+
+func TestResumeAcceptsAcknowledgementAndStartsBackupTimer(t *testing.T) {
+	e := testEngine(t)
+	s := &Status{Instance: "node-a", Cluster: e.Cluster, Epoch: 1, Blocked: true}
+	fakeController(t, e, s, func(action string) error {
+		if action != "/resume" {
+			return errors.New("unexpected action")
+		}
+		s.Blocked, s.Serving = false, true
+		return nil
+	})
+	started := false
+	e.Runner = runFunc(func(_ context.Context, c Command) ([]byte, error) {
+		if c.Name != e.Host.Systemctl || strings.Join(c.Args, " ") != "enable --now matrix-backup.timer" {
+			return nil, fmt.Errorf("unexpected command: %s %v", c.Name, c.Args)
+		}
+		started = true
+		return nil, nil
+	})
+	must(t, e.Resume(context.Background(), "node-a", 1))
+	if !started {
+		t.Fatal("accepted, healthy resume did not enable scheduled backups")
+	}
+}
+
+func TestResumeRejectionDoesNotStartBackupTimer(t *testing.T) {
+	e := testEngine(t)
+	s := &Status{Instance: "node-a", Cluster: e.Cluster, Epoch: 1, Blocked: true}
+	fakeController(t, e, s, func(string) error { return errors.New("ownership mismatch") })
+	e.Runner = runFunc(func(_ context.Context, c Command) ([]byte, error) {
+		t.Errorf("rejected resume ran a host command: %s %v", c.Name, c.Args)
+		return nil, errors.New("unexpected command")
+	})
+	if err := e.Resume(context.Background(), "node-a", 1); err == nil || !strings.Contains(err.Error(), "HTTP 409") {
+		t.Fatalf("expected controller rejection, got %v", err)
+	}
+}
+
+func TestBackupCopiesRuntimeS3ConfigurationWithoutAdjacentFiles(t *testing.T) {
+	root := t.TempDir()
+	project, dest := filepath.Join(root, "project"), filepath.Join(root, "configuration")
+	write(t, filepath.Join(project, "s3/media.env"), "fixture runtime configuration")
+	write(t, filepath.Join(project, "appservices/telegram.yaml"), "fixture registration")
+	for _, name := range []string{"media.env.example", "PLAN.md", ".gitignore", "unrelated-secret.env"} {
+		write(t, filepath.Join(project, "s3", name), "must not be backed up")
+	}
+	must(t, copyApplicationConfiguration(project, dest))
+	for _, name := range []string{"s3/media.env", "appservices/telegram.yaml"} {
+		want, err := os.ReadFile(filepath.Join(project, name))
+		must(t, err)
+		got, err := os.ReadFile(filepath.Join(dest, name))
+		must(t, err)
+		if string(got) != string(want) {
+			t.Fatalf("runtime configuration changed: %s", name)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dest, "s3"))
+	must(t, err)
+	if len(entries) != 1 || entries[0].Name() != "media.env" {
+		t.Fatal("non-runtime files entered the S3 recovery configuration")
 	}
 }
 func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T) {

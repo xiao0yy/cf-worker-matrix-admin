@@ -372,10 +372,8 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 			return err
 		}
 	}
-	for _, n := range []string{"appservices", "s3"} {
-		if err = local.CopyTree(filepath.Join(project, n), filepath.Join(config, n)); err != nil {
-			return err
-		}
+	if err = copyApplicationConfiguration(project, config); err != nil {
+		return err
 	}
 	if _, err = os.Stat(filepath.Join(project, ".env")); err == nil {
 		if err = local.Copy(filepath.Join(project, ".env"), filepath.Join(config, ".env")); err != nil {
@@ -450,6 +448,15 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 		return err
 	}
 	return os.Rename(preparing, filepath.Join(base, "pending"))
+}
+
+// S3 configuration lives beside documentation and examples on existing hosts.
+// Only the mounted runtime file belongs to the recovery configuration capsule.
+func copyApplicationConfiguration(project, config string) error {
+	if err := local.CopyTree(filepath.Join(project, "appservices"), filepath.Join(config, "appservices")); err != nil {
+		return err
+	}
+	return local.Copy(filepath.Join(project, "s3/media.env"), filepath.Join(config, "s3/media.env"))
 }
 func (e *Engine) verifyTree(ctx context.Context, r Repository, snapshot, bundle string) error {
 	b, err := e.rest(ctx, r, "", "ls", "--json", "--recursive", snapshot, "/bundle")

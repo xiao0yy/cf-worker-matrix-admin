@@ -205,7 +205,7 @@ func (e *Engine) controlCall(ctx context.Context, action string, v any) ([]byte,
 	if err != nil || len(b) > 1<<20 {
 		return nil, errors.New("invalid controller response")
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("controller rejected %s (HTTP %d)", action, resp.StatusCode)
 	}
 	return b, nil
