@@ -1,6 +1,8 @@
+import {ManagementError,managementActions,validateParameters,validateManagementTarget,catalog,releases} from './management.js';
 import {verifyAccess} from './access.js';
 const encoder = new TextEncoder();
 const actions = new Set(['probe', 'handover-request', 'handover-resume', 'handover-cancel', 'fence-local', 'resume-local', 'source-resume']);
+for (const action of managementActions) actions.add(action);
 const terminal = new Set(['APPLIED', 'FAILED', 'UNKNOWN', 'REJECTED']);
 const safe = value => typeof value === 'string' && /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$/.test(value) && value !== '..';
 const stableExpected = value => ({revision: value.revision, epoch: value.epoch, owner: value.owner, phase: value.phase});
@@ -17,7 +19,7 @@ async function jsonObject(bucket,key,required=false) {
 }
 async function allObjects(bucket,keyPrefix) {
   const objects=[];let cursor;
-  do {const page=await bucket.list({prefix:keyPrefix,cursor,limit:100});objects.push(...page.objects);if(objects.length>200)throw new Fault(503,'实例或诊断对象超过本工具上限');cursor=page.truncated?page.cursor:undefined;}while(cursor);
+  do {const page=await bucket.list({prefix:keyPrefix,cursor,limit:1000});objects.push(...page.objects);if(objects.length>100000)throw new Fault(503,'控制目录过大，请归档历史记录');cursor=page.truncated?page.cursor:undefined;}while(cursor);
   return objects;
 }
 async function authority(env) {
@@ -38,7 +40,7 @@ async function status(env) {
   const control=await authority(env), keys=await allObjects(env.CONTROL,prefix(env)+'instances/');
   const ids=keys.filter(x=>x.key.endsWith('.json')).map(x=>x.key.slice((prefix(env)+'instances/').length,-5)).filter(safe);
   const instances=await Promise.all(ids.map(id=>readInstance(env,id)));
-  return {schema:1,at:new Date().toISOString(),control,instances,capabilities:{mailbox:1,planned_handover:true,force_takeover:false,automatic_cleanup:false,dns:!!(env.CF_DNS_TOKEN&&env.CF_ZONE_ID&&env.CF_RECORD_ID&&env.CF_RECORD_NAME)}};
+  return {schema:1,at:new Date().toISOString(),control,instances,capabilities:{mailbox:1,planned_handover:true,force_takeover:true,management_protocol:1,automatic_cleanup:false,dns:!!(env.CF_DNS_TOKEN&&env.CF_ZONE_ID&&env.CF_RECORD_ID&&env.CF_RECORD_NAME)}};
 }
 async function saveInstanceInfo(env,input) {
   if(!input||!safe(input.id)||!Object.hasOwn(input,'expected_etag')||(input.expected_etag!==null&&typeof input.expected_etag!=='string')||typeof input.name!=='string'||typeof input.public_ip!=='string'||Object.keys(input).some(k=>!['id','name','public_ip','expected_etag'].includes(k)))throw new Fault(400,'实例信息字段无效');
@@ -62,8 +64,9 @@ function validCommand(body,env) {
   const created=Date.parse(body.created_at),expires=Date.parse(body.expires_at),now=Date.now();
   if(!Number.isFinite(created)||!Number.isFinite(expires)||expires<=created||expires-created>300000||created>now+30000||expires<=now)throw new Fault(400,'指令时间无效或已过期，请校准电脑时间并刷新');
   if(['handover-request','handover-resume','handover-cancel','source-resume'].includes(body.action)&&(!safe(body.operation_id)||body.operation_id.includes('.')||!Number.isSafeInteger(body.source_epoch)||body.source_epoch<1))throw new Fault(400,'缺少切换操作编号及源 epoch');
-  const expectedKeys=['schema','id','cluster_id','target','action','created_at','expires_at','expected','bound_epoch','operation_id','source_epoch'];
+  const expectedKeys=['schema','id','cluster_id','target','action','created_at','expires_at','expected','bound_epoch','operation_id','source_epoch','parameters'];
   if(Object.keys(body.expected).some(k=>!['revision','epoch','owner','phase'].includes(k))||Object.keys(body).some(k=>!expectedKeys.includes(k)))throw new Fault(400,'未知指令字段');
+  if(managementActions.has(body.action))body={...body,parameters:validateParameters(body)};else if(body.parameters!==undefined)throw new Fault(400,'此指令不接受任务参数');
   return Object.fromEntries(expectedKeys.map(k=>[k,body[k]]));
 }
 export async function submit(env,input) {
@@ -80,6 +83,8 @@ export async function submit(env,input) {
   if(!sameExpected(c.expected,state))throw new Fault(409,'权威状态已变化，请刷新后重新确认');
   if(!instance.report_fresh||!instance.agent_fresh||instance.agent?.schema!==1||instance.agent?.cluster_id!==env.CLUSTER_ID||instance.agent?.mailbox_protocol!==1||instance.agent?.instance_id!==c.target||instance.report?.schema!==1||instance.report?.instance_id!==c.target||instance.report?.cluster_id!==env.CLUSTER_ID||instance.report?.bound_epoch!==c.bound_epoch)throw new Fault(409,'实例或指令轮询报告缺失、过期或身份不符；不能提交');
   if(c.action==='handover-request'&&(state.phase!=='ONLINE'||state.owner===c.target||c.source_epoch!==state.epoch))throw new Fault(409,'当前不满足正常切换条件');
+  validateManagementTarget(c,state,instance);
+  if(c.action==='handover-request'&&(!instance.agent?.preflight?.ready||instance.agent.preflight.epoch!==state.epoch||!isFresh(instance.agent.preflight,'checked_at',600)))throw new Fault(409,'先对目标实例执行切换预检，预检有效期 10 分钟');
   const slotKey=base+'commands/'+c.target+'/pending.json',slot=await jsonObject(env.CONTROL,slotKey);
   if(slot){
     const receipt=await jsonObject(env.CONTROL,base+'commands/'+c.target+'/results/'+slot.value.id+'.json');
@@ -112,7 +117,8 @@ async function diagnostics(env) {
   const current=await status(env),events=[];
   for(const instance of current.instances){
     const keys=await allObjects(env.CONTROL,prefix(env)+'commands/'+instance.id+'/results/');
-    for(const entry of keys.slice(-10)){const value=await jsonObject(env.CONTROL,entry.key);if(value)events.push(value.value);}
+    keys.sort((a,b)=>new Date(b.uploaded)-new Date(a.uploaded));
+    for(const entry of keys.slice(0,10)){const value=await jsonObject(env.CONTROL,entry.key);if(value)events.push(value.value);}
   }
   return {schema:1,generated_at:new Date().toISOString(),status:current,command_results:events,note:'报告只含 R2 运维状态，不读取 S3 密钥、消息数据库或原始日志。APPLIED 表示管理命令返回，不代表业务切换已完成。'};
 }
@@ -142,6 +148,8 @@ export default {async fetch(request,env){
     if(request.method==='OPTIONS')return new Response(null,{status:204,headers:{'Cache-Control':'no-store'}});
     let result;
     if(request.method==='GET'&&url.pathname==='/api/status')result=await status(env);
+    else if(request.method==='GET'&&url.pathname==='/api/catalog')result=await catalog(env,{prefix,jsonObject,allObjects},Number(url.searchParams.get("offset")||0));
+    else if(request.method==='GET'&&url.pathname==='/api/releases')result=await releases(env,{prefix,jsonObject});
     else if(request.method==='GET'&&url.pathname==='/api/diagnostic')result=await diagnostics(env);
     else if(request.method==='POST'&&url.pathname==='/api/instance-info')result=await saveInstanceInfo(env,await body(request));
     else if(request.method==='POST'&&url.pathname==='/api/command')result=await submit(env,await body(request));
@@ -150,5 +158,5 @@ export default {async fetch(request,env){
     else if(request.method==='POST'&&url.pathname==='/api/dns')result=await dns(env,await body(request));
     else throw new Fault(404,'未知 API');
     return response(request,result);
-  }catch(error){return response(request,{error:error instanceof Fault?error.message:'存储或服务异常；刷新核对原指令编号，勿自动重试'},error instanceof Fault?error.status:503);}
+  }catch(error){return response(request,{error:(error instanceof Fault||error instanceof ManagementError)?error.message:'存储或服务异常；刷新核对原指令编号，勿自动重试'},(error instanceof Fault||error instanceof ManagementError)?error.status:503);}
 }};

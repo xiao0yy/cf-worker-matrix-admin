@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/payload"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/storage"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -43,6 +44,9 @@ func (e *Engine) readPoint(ctx context.Context, snapshot, expectedHash string) (
 	}
 	if !local.SHA.MatchString(snapshot) || key != e.prefix()+"/points/"+snapshot+".json" {
 		return p, nil, errors.New("invalid point namespace")
+	}
+	if _, _, er := e.Store.Get(ctx, e.prefix()+"/retired/"+snapshot+".json"); !errors.Is(er, storage.Missing) {
+		return p, nil, errors.New("recovery point retired or retirement status unavailable")
 	}
 	b, _, err := e.Store.Get(ctx, key)
 	if err != nil {

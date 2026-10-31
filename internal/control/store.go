@@ -35,7 +35,7 @@ func (s State) validate(cluster string) error {
 		return errors.New("unsupported or invalid control state")
 	}
 	switch s.Phase {
-	case "ONLINE", "REQUESTED", "QUIESCING", "QUIESCED", "SNAPSHOTTING", "RELEASED", "RESTORING", "VALIDATING", "STARTING":
+	case "MAINTENANCE", "ONLINE", "REQUESTED", "QUIESCING", "QUIESCED", "SNAPSHOTTING", "RELEASED", "RESTORING", "VALIDATING", "STARTING":
 	default:
 		return errors.New("unknown control phase")
 	}

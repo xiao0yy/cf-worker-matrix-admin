@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
@@ -57,10 +58,14 @@ func (c *Client) Request(ctx context.Context, method, key string, body []byte, m
 	if key == "" || strings.Contains(key, "..") || strings.ContainsAny(key, "?%#\r\n\\") || strings.HasPrefix(key, "/") {
 		return nil, "", errors.New("invalid object key")
 	}
+	return c.request(ctx, method, key, nil, body, match)
+}
+func (c *Client) request(ctx context.Context, method, key string, query url.Values, body []byte, match string) ([]byte, string, error) {
 	r, e := http.NewRequestWithContext(ctx, method, c.Endpoint+"/"+c.Bucket+"/"+key, bytes.NewReader(body))
 	if e != nil {
 		return nil, "", e
 	}
+	r.URL.RawQuery = strings.ReplaceAll(query.Encode(), "+", "%20")
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	day := stamp[:8]
 	hash := local.Digest(body)
@@ -83,7 +88,7 @@ func (c *Client) Request(ctx context.Context, method, key string, body []byte, m
 	}
 	signed := strings.Join(names, ";")
 	scope := day + "/" + c.Region + "/s3/aws4_request"
-	raw := method + "\n" + r.URL.EscapedPath() + "\n\n" + canonical + "\n" + signed + "\n" + hash
+	raw := method + "\n" + r.URL.EscapedPath() + "\n" + r.URL.RawQuery + "\n" + canonical + "\n" + signed + "\n" + hash
 	k := mac(mac(mac(mac([]byte("AWS4"+c.Secret), day), c.Region), "s3"), "aws4_request")
 	sig := hex.EncodeToString(mac(k, "AWS4-HMAC-SHA256\n"+stamp+"\n"+scope+"\n"+local.Digest([]byte(raw))))
 	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+c.Access+"/"+scope+", SignedHeaders="+signed+", Signature="+sig)
@@ -110,6 +115,55 @@ func (c *Client) Request(ctx context.Context, method, key string, body []byte, m
 		return nil, "", Conflict
 	}
 	return nil, "", fmt.Errorf("R2 HTTP %d", res.StatusCode)
+}
+
+// List is paginated at the transport boundary and rejects foreign keys. Callers
+// specify a bounded namespace; metadata, never credentials, is returned.
+func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
+	if prefix == "" || strings.Contains(prefix, "..") || strings.HasPrefix(prefix, "/") {
+		return nil, errors.New("invalid list prefix")
+	}
+	var keys []string
+	cursor := ""
+	for pageCount := 0; ; pageCount++ {
+		if pageCount >= 1000 {
+			return nil, errors.New("listing pagination limit exceeded")
+		}
+		q := url.Values{"list-type": {"2"}, "prefix": {prefix}, "max-keys": {"1000"}}
+		if cursor != "" {
+			q.Set("continuation-token", cursor)
+		}
+		b, _, err := c.request(ctx, "GET", "", q, nil, "")
+		if err != nil {
+			return nil, err
+		}
+		var page struct {
+			Truncated bool   `xml:"IsTruncated"`
+			Next      string `xml:"NextContinuationToken"`
+			Contents  []struct {
+				Key string `xml:"Key"`
+			} `xml:"Contents"`
+		}
+		if err = xml.Unmarshal(b, &page); err != nil {
+			return nil, err
+		}
+		for _, v := range page.Contents {
+			if !strings.HasPrefix(v.Key, prefix) {
+				return nil, errors.New("list returned foreign namespace")
+			}
+			keys = append(keys, v.Key)
+		}
+		if len(keys) > 100000 {
+			return nil, errors.New("namespace exceeds maintenance inventory limit")
+		}
+		if !page.Truncated {
+			return keys, nil
+		}
+		if page.Next == "" || page.Next == cursor {
+			return nil, errors.New("invalid continuation token")
+		}
+		cursor = page.Next
+	}
 }
 func (c *Client) Get(ctx context.Context, k string) ([]byte, string, error) {
 	return c.Request(ctx, "GET", k, nil, "")

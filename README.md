@@ -36,7 +36,8 @@ matrix-admin status
 | [Telegram 镜像](docs/telegram-image.md) | 上游镜像镜像分发 |
 
 当前支持 Linux amd64、systemd、Docker Compose 插件、nginx auth_request、
-SQLite CLI。强制接管和自动删除旧实例数据尚未开放。
+SQLite CLI。支持人工隔离后的强制接管，以及先审阅计划再执行的备份/本地数据清理。
+运行程序更新由用户从 UI 显式发起，不自动安装。详见 [运维操作](docs/operations.md)。
 
 开发环境使用 Go 与 Node（仅 Worker）：
 

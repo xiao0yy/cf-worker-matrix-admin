@@ -34,6 +34,7 @@ type FinalReceipt struct {
 	VerifiedAt      string `json:"verified_at"`
 }
 type FinalOperation struct {
+	Isolation *Isolation    `json:"external_isolation,omitempty"`
 	ID        string        `json:"id"`
 	Mode      string        `json:"mode"`
 	Source    string        `json:"source"`

@@ -154,7 +154,7 @@ func Lock(p string) (func(), error) {
 	}
 	if e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
 		f.Close()
-		return nil, fmt.Errorf("operation already running: %s", p)
+		return nil, fmt.Errorf("operation already running: %s: %w", p, e)
 	}
 	return func() { f.Close() }, nil
 }

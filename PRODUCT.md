@@ -21,10 +21,11 @@ Cloudflare Access protects the web console. The Worker reads reports and submits
 ## Capabilities and Constraints
 
 - Native HTML, CSS and JavaScript frontend, deployed with the existing Cloudflare Worker through Git.
-- Service status, instance identities, the latest reported backup, command receipts, planned handover, diagnosis and explicit supported recovery actions.
+- Service status, automatic public IPv4 discovery with manual override, backup history and restore drills, explicit runtime upgrades, durable maintenance tasks, planned handover and externally fenced disaster takeover.
+- Destructive storage or retired-instance cleanup always starts with a reviewed, expiring plan; media remains untouched.
 - DNS editing is available only when configured; manual routing remains supported.
 - Stale reports do not prove a machine is stopped. Command acceptance is not service completion. A successful handover requires matching ownership, generation and a fresh serving report.
-- No automatic failover, destructive cleanup, fabricated backup history, throughput, uptime, health metrics or unsupported management controls.
+- No automatic failover, automatic updates or unreviewed cleanup. No fabricated backup history, throughput, uptime or message-delivery claims. Container health and a time-bounded operator delivery confirmation are separate facts.
 - Public code and examples must contain no deployment addresses, account identifiers, bucket names or secrets.
 - UI work must not mutate production services or send test messages.
 

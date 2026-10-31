@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func pairFixture(t *testing.T) (*Controller, *Controller, *finalAuthority, *finalDocker, *finalDocker, string) {
@@ -20,6 +21,9 @@ func pairFixture(t *testing.T) (*Controller, *Controller, *finalAuthority, *fina
 	db := &finalDocker{fakeDocker: &fakeDocker{running: map[string]bool{}}, clean: true}
 	b := &Controller{cfg: bcfg, store: s, docker: db, journal: Journal{Schema: 1, Cluster: "test", Instance: "b", HighEpoch: 2, HighRevision: 4, Blocked: true}, wake: make(chan struct{}, 1), now: a.now}
 	if e := b.saveLocked(); e != nil {
+		t.Fatal(e)
+	}
+	if e := atomicJSON(filepath.Join(bcfg.StateDir, "preflight.json"), map[string]any{"schema": 1, "instance_id": "b", "cluster_id": "test", "epoch": 2, "checked_at": a.now().UTC().Format(time.RFC3339Nano), "ready": true}); e != nil {
 		t.Fatal(e)
 	}
 	root := filepath.Join(bcfg.Generations, "generation", "rebuilt")

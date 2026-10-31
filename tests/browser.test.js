@@ -94,6 +94,7 @@ function fixture() {
     agent: {
       reported_at: now,
       software: { version: "0.2.1" },
+      preflight: {ready:true,epoch:1,checked_at:now},
       host: { hostname: name },
     },
     pending: null,
@@ -542,4 +543,23 @@ test("skip navigation keeps the selected page and focuses main content", () => {
   assert.equal(c.document.getElementById("page-tools").hidden, false);
   assert.equal(c.document.activeElement.id, "main-content");
   assert.equal(c.location.hash, "#tools");
+});
+
+test('automatic public address is displayed while an explicit override wins',()=>{
+ const ctx=browser(),data=fixture();delete data.instances[0].info.public_ip;data.instances[0].agent.public_address={ip:'198.51.100.10'};
+ ctx.data=data;assert.equal(evaluate(ctx,'publicIP(data.instances[0])'),'198.51.100.10');data.instances[0].info.public_ip='203.0.113.10';assert.equal(evaluate(ctx,'publicIP(data.instances[0])'),'203.0.113.10');
+});
+test('maintenance shows unsupported nodes instead of pretending remote upgrade exists',()=>{
+ const ctx=browser();ctx.data=fixture();evaluate(ctx,'snapshot=data;');
+ vm.runInContext(readFileSync(new URL('../web/management.js',import.meta.url),'utf8'),ctx);
+ assert.match(ctx.document.getElementById('management-capability').textContent,/先由 Agent 升级/);
+ assert.equal(ctx.document.getElementById('runtime-upgrade').disabled,true);
+});
+test('merely viewing runtime versions never submits an upgrade command',async()=>{
+ const calls=[];const data=fixture();for(const i of data.instances){i.agent.management_protocol=1;i.agent.actions=['upgrade-runtime'];i.report.blocked=!i.report.serving;}
+ const ctx=browser(async(path)=>{calls.push(path);return Response.json(path==='/api/status'?data:path==='/api/releases'?{releases:[{version:'0.3.0',manifest_sha256:'a'.repeat(64)}]}:{points:[],tasks:[]});});
+ vm.runInContext(readFileSync(new URL('../web/management.js',import.meta.url),'utf8'),ctx);
+ await evaluate(ctx,'refresh()');evaluate(ctx,'window.Management.selectTab("updates")');await new Promise(r=>setImmediate(r));
+ assert(calls.includes('/api/releases'));assert(!calls.some(x=>x==='/api/command'));
+ assert.equal(ctx.document.getElementById('runtime-upgrade').disabled,true,'online owner must first be fenced');
 });

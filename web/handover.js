@@ -110,8 +110,15 @@ window.Handover = (() => {
     if (!c) return null;
     const completed = c.phase === "ONLINE";
     const op = completed ? c.last_completed : c.operation;
-    if (!op || op.mode !== "planned" || !op.id || !op.source || !op.target)
+    if (
+      !op ||
+      !["planned", "forced"].includes(op.mode) ||
+      !op.id ||
+      !op.source ||
+      !op.target
+    )
       return null;
+    const forced = op.mode === "forced";
     const source = snapshot.instances.find((i) => i.id === op.source);
     const target = snapshot.instances.find((i) => i.id === op.target);
     // READY is a real intermediate state: the control phase returns to
@@ -155,22 +162,28 @@ window.Handover = (() => {
       snapshot.instances.some(
         (i) =>
           fresh(i, "report", now) &&
+          (!forced ||
+            !op.external_isolation?.instances?.includes(i.id) ||
+            Date.parse(i.report.reported_at) > Date.parse(op.started_at)) &&
           i.report?.serving &&
           (i.id !== c.owner || i.report.bound_epoch !== c.epoch),
       );
-    const mode = !known
-      ? "unknown"
-      : conflict
-        ? "error"
-        : stale
-          ? "stale"
-          : failure
-            ? "error"
-            : completed && !onlineConfirmed
-              ? "awaiting"
-              : completed
-                ? "complete"
-                : "running";
+    const mode =
+      !known
+        ? "unknown"
+        : conflict
+          ? "error"
+          : stale
+            ? "stale"
+            : failure
+              ? "error"
+              : worker?.agent?.handover_paused && !completed
+                ? "paused"
+                : completed && !onlineConfirmed
+                  ? "awaiting"
+                  : completed
+                    ? "complete"
+                    : "running";
     const owner =
       c.owner === op.source
         ? "source"
@@ -181,40 +194,47 @@ window.Handover = (() => {
             : "unknown";
     return {
       id: op.id,
+      forced,
       phase,
       step,
       mode,
       owner,
       source: {
         name: name(source || { id: op.source }),
-        ip: source?.info?.public_ip || "",
-        status: sourceStatus,
+        ip: source?.info?.public_ip || source?.agent?.public_address?.ip || "",
+        status: forced ? "人工确认已隔离" : sourceStatus,
       },
       target: {
         name: name(target || { id: op.target }),
-        ip: target?.info?.public_ip || "",
+        ip: target?.info?.public_ip || target?.agent?.public_address?.ip || "",
         status:
           completed && mode !== "complete" ? "上线状态待确认" : targetStatus,
       },
-      storeStatus,
+      storeStatus: forced ? "使用选定恢复点" : storeStatus,
       title:
-        mode === "stale"
-          ? "状态更新中断，等待新的报告"
-          : mode === "error"
-            ? "交接需要检查"
-            : mode === "awaiting"
-              ? "等待新实例的上线报告"
-              : title,
+        mode === "paused"
+          ? "切换推进已暂停"
+          : mode === "stale"
+            ? "状态更新中断，等待新的报告"
+            : mode === "error"
+              ? "交接需要检查"
+              : mode === "awaiting"
+                ? "等待新实例的上线报告"
+                : title,
       description:
-        mode === "stale"
-          ? "以下是最后一次观测，动效已暂停。报告过期不代表实例已经停止。"
-          : mode === "error"
-            ? conflict
-              ? "存在与当前归属不一致的服务报告，请先核对实例。"
-              : failure
-            : mode === "awaiting"
-              ? "归属记录已完成，但还没有匹配的有效服务报告，暂不确认成功。"
-              : description,
+        mode === "paused"
+          ? "保留当前阶段和数据，可在运维工具继续推进。"
+          : mode === "stale"
+            ? "以下是最后一次观测，动效已暂停。报告过期不代表实例已经停止。"
+            : mode === "error"
+              ? conflict
+                ? "存在与当前归属不一致的服务报告，请先核对实例。"
+                : failure
+              : mode === "awaiting"
+                ? "归属记录已完成，但还没有匹配的有效服务报告，暂不确认成功。"
+                : forced
+                  ? "从人工选定的恢复点接管；旧机隔离依据操作人的确认，恢复点之后的数据可能丢失。"
+                  : description,
       flow:
         mode === "running" && phase === "SNAPSHOTTING"
           ? "upload"
@@ -293,6 +313,7 @@ window.Handover = (() => {
         if (!next) return;
         const key = `${next.id}:${next.phase}:${next.mode}`;
         scene.dataset.phase = next.phase;
+        scene.dataset.takeover = next.forced ? "forced" : "planned";
         scene.dataset.mode = next.mode;
         scene.dataset.flow = next.flow;
         scene.dataset.owner = next.owner;
@@ -302,7 +323,8 @@ window.Handover = (() => {
         set(
           "state",
           {
-            running: "交接进行中",
+            running: next.forced ? "强制接管中" : "交接进行中",
+            paused: "已暂停推进",
             complete: "已确认上线",
             stale: "状态待确认",
             error: "需要处理",
@@ -317,6 +339,7 @@ window.Handover = (() => {
         set("target-ip", next.target.ip || "未登记公网 IP");
         set("target-status", next.target.status);
         set("store-status", next.storeStatus);
+        set("source-transfer-label", next.forced ? "已有备份" : "保存快照");
         set(
           "owner",
           {
@@ -331,8 +354,12 @@ window.Handover = (() => {
           next.step < 0
             ? "阶段未知"
             : next.mode === "complete"
-              ? "7 个阶段已完成"
-              : `阶段 ${next.step + 1} / 7`,
+              ? next.forced
+                ? "3 个阶段已完成"
+                : "7 个阶段已完成"
+              : next.forced
+                ? `阶段 ${next.step - 3} / 3`
+                : `阶段 ${next.step + 1} / 7`,
         );
         set(
           "snapshot",
@@ -343,6 +370,9 @@ window.Handover = (() => {
         fields.snapshot.title = next.snapshot;
         set("detail", JSON.stringify(next.raw, null, 2));
         for (const [index, item] of [...list.children].entries()) {
+          item.hidden = !!next.forced && index < 4;
+          item.lastElementChild.textContent =
+            next.forced && index === 6 ? "完成接管" : stages[index];
           const done = next.mode === "complete" || index < next.step;
           item.dataset.state = done
             ? "done"
@@ -354,7 +384,7 @@ window.Handover = (() => {
           else item.removeAttribute("aria-current");
           item.querySelector(".stage-dot").textContent = done
             ? ""
-            : String(index + 1);
+            : String(next.forced ? index - 3 : index + 1);
         }
         // DOM identity is stable across polls. Only a real state change gets an
         // arrival transition; a 15-second refresh never restarts the sequence.

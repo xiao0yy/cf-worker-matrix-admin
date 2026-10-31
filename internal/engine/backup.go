@@ -55,7 +55,7 @@ func (e *Engine) permit(ctx context.Context, op string, binding *Binding) (Statu
 	}
 	return s, nil
 }
-func (e *Engine) Backup(ctx context.Context, full bool) error {
+func (e *Engine) Backup(ctx context.Context, full bool) (err error) {
 	if err := e.connect(); err != nil {
 		return err
 	}
@@ -69,6 +69,19 @@ func (e *Engine) Backup(ctx context.Context, full bool) error {
 		return err
 	}
 	defer unlock()
+	status := map[string]any{"state": "RUNNING", "started_at": e.stamp(), "updated_at": e.stamp(), "full_restore": full}
+	if err = local.JSON(filepath.Join(state, "job-status.json"), status); err != nil {
+		return err
+	}
+	defer func() {
+		status["state"] = "SUCCEEDED"
+		if err != nil {
+			status["state"] = "FAILED"
+			status["error"] = err.Error()
+		}
+		status["updated_at"] = e.stamp()
+		_ = local.JSON(filepath.Join(state, "job-status.json"), status)
+	}()
 	return e.backup(ctx, root, "", full)
 }
 func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {

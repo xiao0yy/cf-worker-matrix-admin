@@ -158,7 +158,8 @@ func newPublisherFixture(t *testing.T) publisherFixture {
 	gz.Close()
 	archive := compressed.Bytes()
 	agent := []byte("instructions\n")
-	for name, b := range map[string][]byte{"matrix-admin-linux-amd64.tar.gz": archive, "AGENT.md": agent, "notes.md": []byte("notes"), "SHA256SUMS": []byte(local.Digest(agent) + "  AGENT.md\n" + local.Digest(archive) + "  matrix-admin-linux-amd64.tar.gz\n")} {
+	manifest := []byte("manifest-fixture")
+	for name, b := range map[string][]byte{"matrix-admin-linux-amd64.tar.gz": archive, "AGENT.md": agent, "manifest.json": manifest, "notes.md": []byte("notes"), "SHA256SUMS": []byte(local.Digest(manifest) + "  manifest.json\n" + local.Digest(agent) + "  AGENT.md\n" + local.Digest(archive) + "  matrix-admin-linux-amd64.tar.gz\n")} {
 		if e = os.WriteFile(filepath.Join(assets, name), b, 0600); e != nil {
 			t.Fatal(e)
 		}
@@ -197,7 +198,7 @@ func TestPublisherInterruptedUploadRetriesAndNeverHidesPublishedRelease(t *testi
 	if e := local.ReadJSON(filepath.Join(f.remote, "release.json"), &state); e != nil {
 		t.Fatal(e)
 	}
-	if state.IsDraft || len(state.Assets) != 3 || state.Name != "Matrix Admin v0.2.0" || state.Body != "notes" {
+	if state.IsDraft || len(state.Assets) != 4 || state.Name != "Matrix Admin v0.2.0" || state.Body != "notes" {
 		t.Fatal("not published complete")
 	}
 	if e := f.run(""); e != nil {
@@ -241,7 +242,7 @@ func TestPublisherCompletesPublicReleaseAndRetriesWithoutHidingIt(t *testing.T) 
 	if e := local.ReadJSON(statefile, &state); e != nil {
 		t.Fatal(e)
 	}
-	if state.IsDraft || len(state.Assets) != 3 || state.Name != "Matrix Admin v0.2.0" || state.Body != "notes" {
+	if state.IsDraft || len(state.Assets) != 4 || state.Name != "Matrix Admin v0.2.0" || state.Body != "notes" {
 		t.Fatal("public release was not completed")
 	}
 }

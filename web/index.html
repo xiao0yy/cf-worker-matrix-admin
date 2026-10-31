@@ -15,6 +15,7 @@
     />
     <link rel="stylesheet" href="style.css" />
     <link rel="stylesheet" href="handover.css" />
+    <link rel="stylesheet" href="management.css" />
   </head>
   <body>
     <svg
@@ -323,7 +324,9 @@
         <header class="page-heading">
           <div>
             <h1 id="switch-title" tabindex="-1">切换实例</h1>
-            <p>先完成旧实例的最终备份，再让新实例接管服务。</p>
+            <p id="switch-intro">
+              先完成旧实例的最终备份，再让新实例接管服务。
+            </p>
           </div>
           <button id="handover-demo-open" class="button-secondary">
             <svg
@@ -511,6 +514,13 @@
           </div>
           <button id="diagnostic" class="button-secondary">导出诊断</button>
         </header>
+        <div class="disaster-entry">
+          <div>
+            <strong>旧实例已经失联？</strong
+            ><span>从选定恢复点接管，保留隔离与数据损失确认记录。</span>
+          </div>
+          <button id="force-open" class="button-secondary">强制接管</button>
+        </div>
         <div class="tool-target">
           <div class="tool-target-icon" aria-hidden="true">
             <svg
@@ -528,6 +538,209 @@
           </div>
           <div id="tool-target-status" class="tool-target-status"></div>
         </div>
+        <section
+          id="management"
+          class="management"
+          aria-labelledby="management-title"
+        >
+          <div class="panel-heading">
+            <h2 id="management-title">实例维护</h2>
+            <p id="management-capability">读取实例能力…</p>
+          </div>
+          <div class="management-tabs" role="tablist" aria-label="维护功能">
+            <button
+              role="tab"
+              id="tab-backups"
+              aria-controls="panel-backups"
+              aria-selected="true"
+              data-maint-tab="backups"
+            >
+              备份与恢复
+            </button>
+            <button
+              role="tab"
+              id="tab-updates"
+              aria-controls="panel-updates"
+              aria-selected="false"
+              tabindex="-1"
+              data-maint-tab="updates"
+            >
+              版本与配置
+            </button>
+            <button
+              role="tab"
+              id="tab-tasks"
+              aria-controls="panel-tasks"
+              aria-selected="false"
+              tabindex="-1"
+              data-maint-tab="tasks"
+            >
+              任务记录
+            </button>
+            <button
+              role="tab"
+              id="tab-storage"
+              aria-controls="panel-storage"
+              aria-selected="false"
+              tabindex="-1"
+              data-maint-tab="storage"
+            >
+              空间回收
+            </button>
+          </div>
+          <p id="management-error" class="form-message" role="status"></p>
+          <section
+            id="panel-backups"
+            role="tabpanel"
+            aria-labelledby="tab-backups"
+          >
+            <div class="maintenance-toolbar">
+              <button id="backup-now" class="button-primary">立即备份</button
+              ><label class="inline-check"
+                ><input id="backup-full" type="checkbox" />完整恢复校验</label
+              ><button id="catalog-refresh" class="button-quiet">
+                刷新恢复点
+              </button>
+            </div>
+            <p class="muted">
+              数据库保存到备份仓库；媒体继续使用现有
+              S3。演练恢复到独立目录，不启用业务。
+            </p>
+            <div id="recovery-history" class="maintenance-list"></div>
+            <p id="catalog-coverage" class="small muted"></p>
+            <button id="catalog-more" class="button-quiet" hidden>
+              查看更早的记录
+            </button>
+          </section>
+          <section
+            id="panel-updates"
+            role="tabpanel"
+            aria-labelledby="tab-updates"
+            hidden
+          >
+            <div class="version-summary">
+              <div>
+                <span class="muted">当前运行版本</span
+                ><strong id="runtime-version">—</strong>
+              </div>
+              <p>
+                自动发现版本，由你选择安装。备用机升级保持备用；在线机需先停用，升级完成后再显式恢复。
+              </p>
+            </div>
+            <div class="maintenance-toolbar">
+              <label for="runtime-release">可安装版本</label
+              ><select id="runtime-release">
+                <option value="">读取版本目录…</option></select
+              ><button id="runtime-upgrade" class="button-primary">
+                安装所选版本</button
+              ><button id="release-refresh" class="button-quiet">
+                检查版本
+              </button>
+            </div>
+            <a
+              id="release-notes"
+              class="text-link"
+              target="_blank"
+              rel="noopener noreferrer"
+              hidden
+              >查看所选版本说明</a
+            >
+            <p id="release-message" class="small muted" role="status"></p>
+            <div class="maintenance-toolbar">
+              <button data-maint-action="preflight" class="button-secondary">
+                执行切换预检</button
+              ><button
+                data-maint-action="refresh-config"
+                class="button-secondary"
+              >
+                刷新备用机配置</button
+              ><button
+                data-maint-action="health-check"
+                class="button-secondary"
+              >
+                检查业务状态
+              </button>
+            </div>
+            <p id="business-health" class="small muted"></p>
+            <button id="delivery-confirm" class="text-button">
+              我已验证 Telegram 与 Matrix 双向新消息
+            </button>
+          </section>
+          <section
+            id="panel-tasks"
+            role="tabpanel"
+            aria-labelledby="tab-tasks"
+            hidden
+          >
+            <div class="maintenance-toolbar">
+              <button
+                data-maint-action="handover-pause"
+                class="button-secondary"
+              >
+                暂停切换推进</button
+              ><button
+                data-maint-action="handover-continue"
+                class="button-secondary"
+              >
+                继续切换推进
+              </button>
+            </div>
+            <p class="muted">
+              取消会停止后续步骤并保留数据；不会自动撤销已经完成的写入。页面关闭后，任务仍由实例执行。
+            </p>
+            <p id="scheduled-backup" class="small muted"></p>
+            <div id="task-history" class="maintenance-list"></div>
+            <button id="tasks-more" class="button-quiet" hidden>
+              查看更早的任务
+            </button>
+          </section>
+          <section
+            id="panel-storage"
+            role="tabpanel"
+            aria-labelledby="tab-storage"
+            hidden
+          >
+            <p>
+              先生成计划，核对恢复点或本地目录后再执行。备份清理要求当前归属实例已停用，完成后仍保持停用。
+            </p>
+            <div class="retention-inputs">
+              <label
+                >至少保留最近<input
+                  id="keep-last"
+                  type="number"
+                  min="2"
+                  max="10000"
+                  value="14"
+                />个恢复点</label
+              ><label
+                >并保留最近<input
+                  id="keep-days"
+                  type="number"
+                  min="1"
+                  max="3650"
+                  value="30"
+                />天</label
+              >
+            </div>
+            <div class="maintenance-toolbar">
+              <button id="storage-plan" class="button-secondary">
+                生成备份清理计划</button
+              ><button
+                data-maint-action="cleanup-plan"
+                class="button-secondary"
+              >
+                生成旧实例清理计划
+              </button>
+            </div>
+            <p class="small muted">
+              清理中断后可重试原任务，或校验仓库后结束维护；服务仍保持停用。
+            </p>
+            <button data-maint-action="maintenance-recover" class="text-button">
+              校验仓库并结束维护
+            </button>
+            <div id="cleanup-plans" class="maintenance-list"></div>
+          </section>
+        </section>
         <div class="tool-list">
           <section class="tool-section">
             <div class="panel-heading">
@@ -675,7 +888,7 @@
           </section>
         </div>
         <p class="tools-limit">
-          此版本支持正常交接和上述恢复操作，尚不支持强制接管或自动清理旧数据。
+          强制接管要求人工确认旧节点已关闭或完全隔离。清理始终按已审阅计划执行，媒体不会被删除。
         </p>
         <details class="technical">
           <summary>完整状态与错误</summary>
@@ -783,6 +996,85 @@
         </button>
       </div>
       <div id="backup-detail"></div>
+    </dialog>
+    <dialog
+      id="takeover-dialog"
+      aria-labelledby="takeover-title"
+      class="takeover-dialog"
+    >
+      <div class="dialog-heading">
+        <div>
+          <h2 id="takeover-title">从备份强制接管</h2>
+          <p>
+            旧机失联不代表已停止写入。先在 VPS 平台关机或完全隔离，再提交接管。
+          </p>
+        </div>
+        <button
+          class="icon-button"
+          data-close="takeover-dialog"
+          aria-label="关闭强制接管"
+        >
+          ×
+        </button>
+      </div>
+      <form id="takeover-form">
+        <label
+          >由哪台备用实例接管<select id="takeover-target" required></select
+        ></label>
+        <label
+          >使用哪个恢复点<select id="takeover-point" required></select
+        ></label>
+        <p id="takeover-point-note" class="form-message"></p>
+        <fieldset>
+          <legend>确认旧写入节点的隔离情况</legend>
+          <div id="takeover-isolated"></div>
+        </fieldset>
+        <label
+          >隔离方式<select id="takeover-method">
+            <option value="powered-off">已在 VPS 平台关机</option>
+            <option value="fully-isolated">
+              已完全隔离（包括 Telegram 出站连接）
+            </option>
+          </select></label
+        >
+        <label
+          >操作记录<input
+            id="takeover-note"
+            required
+            minlength="3"
+            maxlength="500"
+            placeholder="例如：已在供应商控制台关闭旧 VPS"
+        /></label>
+        <label class="inline-check"
+          ><input id="takeover-route" type="checkbox" required />我已将
+          Cloudflare 入口切换到所选备用实例</label
+        >
+        <label class="inline-check"
+          ><input
+            id="takeover-loss"
+            type="checkbox"
+            required
+          />我接受所选恢复点之后的消息或状态可能丢失</label
+        >
+        <label
+          >输入“强制接管”确认<input
+            id="takeover-confirm"
+            autocomplete="off"
+            required
+        /></label>
+        <p id="takeover-error" class="form-message" role="status"></p>
+        <div class="dialog-actions">
+          <button
+            type="button"
+            data-close="takeover-dialog"
+            class="button-secondary"
+          >
+            取消</button
+          ><button id="takeover-submit" class="button-primary" type="submit">
+            提交强制接管
+          </button>
+        </div>
+      </form>
     </dialog>
     <dialog id="action-dialog" aria-labelledby="action-dialog-title">
       <div class="dialog-heading">
@@ -906,7 +1198,7 @@
               <g class="flow-packet">
                 <rect x="0" y="9" width="12" height="6" rx="3" />
               </g></svg
-            ><span>保存快照</span>
+            ><span data-field="source-transfer-label">保存快照</span>
           </div>
           <div class="handover-node node-store">
             <div class="node-visual">
@@ -969,5 +1261,6 @@
     </template>
     <script src="handover.js"></script>
     <script src="app.js"></script>
+    <script src="management.js"></script>
   </body>
 </html>

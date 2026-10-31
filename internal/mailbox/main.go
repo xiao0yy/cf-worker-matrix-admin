@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/management"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/storage"
 	"io"
@@ -26,8 +27,8 @@ import (
 
 const protocol = 1
 
-var errMissing = errors.New("object not found")
-var errConflict = errors.New("conditional write conflict")
+var errMissing = storage.Missing
+var errConflict = storage.Conflict
 
 type Store interface {
 	Get(context.Context, string) ([]byte, string, error)
@@ -175,17 +176,18 @@ type Expected struct {
 	Phase    string `json:"phase"`
 }
 type Command struct {
-	Schema      int      `json:"schema"`
-	ID          string   `json:"id"`
-	Cluster     string   `json:"cluster_id"`
-	Target      string   `json:"target"`
-	Action      string   `json:"action"`
-	Created     string   `json:"created_at"`
-	Expires     string   `json:"expires_at"`
-	Expected    Expected `json:"expected"`
-	Bound       uint64   `json:"bound_epoch"`
-	Operation   string   `json:"operation_id"`
-	SourceEpoch uint64   `json:"source_epoch"`
+	Schema      int                   `json:"schema"`
+	ID          string                `json:"id"`
+	Cluster     string                `json:"cluster_id"`
+	Target      string                `json:"target"`
+	Action      string                `json:"action"`
+	Created     string                `json:"created_at"`
+	Expires     string                `json:"expires_at"`
+	Expected    Expected              `json:"expected"`
+	Bound       uint64                `json:"bound_epoch"`
+	Operation   string                `json:"operation_id"`
+	SourceEpoch uint64                `json:"source_epoch"`
+	Parameters  management.Parameters `json:"parameters,omitempty"`
 }
 type Receipt struct {
 	Schema    int    `json:"schema"`
@@ -243,6 +245,15 @@ func (p *Poller) validate(c Command, now time.Time) error {
 	}
 	if c.Expected.Epoch == 0 || c.Expected.Revision == 0 {
 		return errors.New("missing expected authority")
+	}
+	if management.IsAction(c.Action) {
+		if c.Operation != "" || c.SourceEpoch != 0 {
+			return errors.New("management tasks do not accept legacy operation fields")
+		}
+		return taskRequest(c).Validate()
+	}
+	if string(release.JSON(c.Parameters)) != string(release.JSON(management.Parameters{})) {
+		return errors.New("unexpected parameters")
 	}
 	switch c.Action {
 	case "probe", "fence-local", "resume-local":
@@ -450,6 +461,12 @@ func (p *Poller) report(ctx context.Context, err error) error {
 		if root == "" {
 			root = p.foundation
 		}
+		if b, er := os.ReadFile(filepath.Join(root, "backup-state/tuwunel-restic/job-status.json")); er == nil && len(b) < 65536 {
+			var v any
+			if json.Unmarshal(b, &v) == nil {
+				report["scheduled_backup"] = v
+			}
+		}
 		// Point summaries are observations, not authorization or restore selection.
 		b, er := os.ReadFile(filepath.Join(root, "backup-state/tuwunel-restic/last-success.json"))
 		if er == nil && len(b) < 65536 {
@@ -465,6 +482,7 @@ func (p *Poller) report(ctx context.Context, err error) error {
 			}
 		}
 	}
+	p.observations(ctx, report)
 	b, _ := json.Marshal(report)
 	return p.store.Put(ctx, p.prefix()+"agents/"+p.cfg.Instance+".json", b, "")
 }
@@ -497,6 +515,23 @@ func runLocalBinary(configPath, bin string) (func(context.Context) (Status, erro
 		return st, e
 	}
 	run := func(ctx context.Context, c Command, st Status) error {
+		if management.IsAction(c.Action) {
+			root := pRoot(base)
+			switch c.Action {
+			case "task-cancel":
+				return management.Cancel(root, c.Parameters.Task)
+			case "task-retry":
+				return management.Retry(root, c.Parameters.Task)
+			case "handover-pause", "handover-continue":
+				cmd := exec.CommandContext(ctx, bin, c.Action, "--root", root, "--instance", c.Target)
+				if _, err := cmd.Output(); err != nil {
+					return errors.New("handover intervention failed; inspect the local task log")
+				}
+				return nil
+			default:
+				return management.Enqueue(root, taskRequest(c))
+			}
+		}
 		if c.Action == "probe" {
 			return nil
 		}
@@ -527,6 +562,11 @@ func runLocalBinary(configPath, bin string) (func(context.Context) (Status, erro
 		return e
 	}
 	return status, run
+}
+
+func taskRequest(c Command) management.Request {
+	return management.Request{ID: c.ID, Cluster: c.Cluster, Target: c.Target, Action: c.Action, Created: c.Created,
+		Expected: management.Expected{Revision: c.Expected.Revision, Epoch: c.Expected.Epoch, Owner: c.Expected.Owner, Phase: c.Expected.Phase}, Parameters: c.Parameters}
 }
 func Run(args []string) error {
 	flags := flag.NewFlagSet("mailbox", flag.ContinueOnError)

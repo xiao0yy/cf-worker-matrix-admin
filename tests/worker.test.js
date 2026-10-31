@@ -31,7 +31,7 @@ async function fixture(){const CONTROL=new MemoryR2(),env={CONTROL,CLUSTER_ID:'t
  const control={schema:1,cluster_id:'test',revision:3,epoch:1,owner:'A',phase:'ONLINE',operation:null};
  await CONTROL.set(root+'control.json',control);
  await CONTROL.set(root+'instances/B.json',{schema:1,cluster_id:'test',instance_id:'B',bound_epoch:0,serving:false,reported_at:new Date().toISOString()});
- await CONTROL.set(root+'agents/B.json',{schema:1,cluster_id:'test',instance_id:'B',mailbox_protocol:1,reported_at:new Date().toISOString()});
+ await CONTROL.set(root+'agents/B.json',{schema:1,cluster_id:'test',instance_id:'B',mailbox_protocol:1,preflight:{ready:true,epoch:1,checked_at:new Date().toISOString()},reported_at:new Date().toISOString()});
  CONTROL.writes=[];
  const commandTime=Date.now();
  const command={schema:1,id:'cmd-one',cluster_id:'test',target:'B',action:'handover-request',created_at:new Date(commandTime).toISOString(),expires_at:new Date(commandTime+300000).toISOString(),expected:{revision:3,epoch:1,owner:'A',phase:'ONLINE'},bound_epoch:0,operation_id:'move-one',source_epoch:1};
@@ -121,4 +121,63 @@ test('machine identity rejects paths, nonexistent instances, invalid IPs and aut
  for(const change of [{id:'../control'},{id:'missing'},{public_ip:'999.1.2.3'},{public_ip:'https://evil.example'},{public_ip:'0192.0.2.11'},{name:'x'.repeat(81)},{name:'a\nb'},{owner:'B'}]){
   const response=await worker.fetch(request(env,'/api/instance-info','POST',{...input,...change}),env);assert([400,404].includes(response.status));
  }assert.equal(CONTROL.writes.length,0);
+});
+
+async function managedFixture(action, parameters={}) {
+ const f=await fixture();
+ const agent=await f.CONTROL.value(root+'agents/B.json');
+ agent.management_protocol=1;agent.actions=[action];await f.CONTROL.set(root+'agents/B.json',agent);
+ delete f.command.operation_id;delete f.command.source_epoch;
+ Object.assign(f.command,{action,parameters});f.CONTROL.writes=[];return f;
+}
+test('management tasks require node capability and never mutate authority',async()=>{
+ const f=await managedFixture('backup-now',{full:true});
+ await submit(f.env,f.command);
+ assert(f.CONTROL.writes.every(k=>k.startsWith(root+'commands/')));
+ const bad=await managedFixture('backup-now',{full:true});
+ const agent=await bad.CONTROL.value(root+'agents/B.json');delete agent.management_protocol;await bad.CONTROL.set(root+'agents/B.json',agent);
+ await assert.rejects(()=>submit(bad.env,bad.command),/升级/);
+});
+test('task parameters reject command injection and unsupported fields before writing',async()=>{
+ for(const [action,parameters] of [['backup-now',{full:'yes'}],['health-check',{command:'sh'}],['upgrade-runtime',{version:'../latest',manifest_sha256:'a'.repeat(64)}],['storage-plan',{keep_last:1,keep_days:30}],['task-cancel',{task_id:'../x'}],['preflight',{snapshot_id:'a'.repeat(64)}]]){
+  const {env,CONTROL,command}=await managedFixture(action,parameters);await assert.rejects(()=>submit(env,command));assert.equal(CONTROL.writes.length,0);
+ }
+});
+test('forced takeover requires loss acknowledgment and isolation of every previous writer',async()=>{
+ const parameters={snapshot_id:'a'.repeat(64),point_sha256:'b'.repeat(64),isolated_instances:['A'],isolation_method:'powered-off',note:'provider confirmed power off',accept_data_loss:true};
+ for(const change of [{accept_data_loss:false},{isolated_instances:[]},{isolated_instances:['B']},{isolated_instances:['A','A']},{isolation_method:'no-heartbeat'}]){
+  const f=await managedFixture('force-takeover',{...parameters,...change});await assert.rejects(()=>submit(f.env,f.command));assert.equal(f.CONTROL.writes.length,0);
+ }
+ const f=await managedFixture('force-takeover',parameters);
+ f.control.operation={source:'A',target:'C'};await f.CONTROL.set(root+'control.json',f.control);f.CONTROL.writes=[];
+ await assert.rejects(()=>submit(f.env,f.command),/全部/);
+ f.command.parameters.isolated_instances.push('C');await submit(f.env,f.command);
+ assert(f.CONTROL.writes.every(k=>k.startsWith(root+'commands/')));
+});
+test('failed or expired preflight blocks planned handover without stopping source',async()=>{
+ for(const change of [{ready:false},{epoch:2},{checked_at:'2020-01-01T00:00:00Z'}]){
+ const f=await fixture(),a=await f.CONTROL.value(root+'agents/B.json');Object.assign(a.preflight,change);await f.CONTROL.set(root+'agents/B.json',a);f.CONTROL.writes=[];
+ await assert.rejects(()=>submit(f.env,f.command),/预检/);assert.equal(f.CONTROL.writes.length,0);
+ }
+});
+test('catalog excludes retired points and never exposes configuration or repository credentials',async()=>{
+ const f=await fixture();
+ for(const id of ['a','b'])await f.CONTROL.set(root+'recovery/v2/points/'+id.repeat(64)+'.json',{protocol:2,point_schema:2,snapshot_id:id.repeat(64),instance_control:{cluster_id:'test',source_instance_id:'A',source_epoch:1},data_time:new Date().toISOString(),repository_password:'PRIVATE',configuration:{secret:'PRIVATE'},media_included:false});
+ await f.CONTROL.set(root+'recovery/v2/retired/'+ 'b'.repeat(64)+'.json',{});
+ const r=await worker.fetch(request(f.env,'/api/catalog'),f.env);assert.equal(r.status,200);
+ const text=await r.text();assert(!text.includes('PRIVATE'));const data=JSON.parse(text);assert.equal(data.points.length,1);assert.equal(data.points[0].snapshot_id,'a'.repeat(64));assert.match(data.points[0].point_sha256,/^[a-f0-9]{64}$/);
+ assert.equal((await worker.fetch(request(f.env,'/api/catalog?offset=-1'),f.env)).status,400);
+});
+test('new catalog and release endpoints require Access before any storage reads',async()=>{
+ const f=await fixture();f.CONTROL.get=()=>{throw Error('must not read R2');};
+ for(const path of ['/api/catalog','/api/releases'])assert.equal((await worker.fetch(new Request('https://admin.example'+path),f.env)).status,401);
+});
+test('release discovery checks manifest hash and reports explicit installation only',async()=>{
+ const f=await fixture(),original=globalThis.fetch;
+ const manifest={schema:1,project:'matrix-admin',version:'0.3.0',platform:'linux/amd64',runtime:'native-go-v1',control_protocol:1,mailbox_protocol:1,recovery_readers:[2],commit:'a'.repeat(40)};
+ const text=JSON.stringify(manifest),hash=await sha256(text);let calls=0;
+ globalThis.fetch=async url=>{const u=String(url);if(u.includes('/cdn-cgi/'))return original(url);calls++;
+ if(u.includes('/repos/'))return Response.json([{tag_name:'v0.3.0',assets:['manifest.json','SHA256SUMS','matrix-admin-linux-amd64.tar.gz'].map(name=>({name})),published_at:new Date().toISOString()}]);
+ if(u.endsWith('/manifest.json'))return new Response(text);if(u.endsWith('/SHA256SUMS'))return new Response(hash+'  manifest.json\n');throw Error('Unexpected URL');};
+ try{const a=await worker.fetch(request(f.env,'/api/releases'),f.env);assert.equal(a.status,200);const v=await a.json();assert.equal(v.automatic_install,false);assert.equal(v.releases[0].manifest_sha256,hash);await worker.fetch(request(f.env,'/api/releases'),f.env);assert.equal(calls,3);assert(f.CONTROL.writes.every(k=>k===root+'observations/releases.json'));}finally{globalThis.fetch=original;}
 });

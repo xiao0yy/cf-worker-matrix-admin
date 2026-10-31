@@ -19,12 +19,13 @@ Release 自带完整检查。需要重试发布时重跑失败 job，或手动�
 附件，只上传缺失附件，全部验证后生成标题和说明。中断后可重跑失败的 publish
 job，无需删除 Release 或重建 tag。若附件内容冲突，修复应使用新 tag。
 
-公开附件只有三个：
+公开附件有四个：
 
 | 附件 | 内容 |
 | --- | --- |
 | `matrix-admin-linux-amd64.tar.gz` | matrix-admin、restic、manifest.json、AGENT.md、LICENSE、THIRD-PARTY.md |
-| `SHA256SUMS` | 压缩包与 AGENT.md 的 SHA256 |
+| `SHA256SUMS` | 压缩包、AGENT.md 与 manifest.json 的 SHA256 |
+| `manifest.json` | 与包内逐字节相同的版本、协议与文件清单，供管理端发现可升级版本 |
 | `AGENT.md` | 服务器 Agent 的同版本部署/恢复说明 |
 
 GitHub 自动生成的源码下载链接不属于服务器运行依赖。Release 描述由 tag 间
@@ -40,3 +41,7 @@ GitHub 自动生成的源码下载链接不属于服务器运行依赖。Release
 
 仓库中的 `tools/release` 和 `scripts/publish-release.sh` 是开发/CI 工具，
 不会进入运行包。VPS 不安装 Go、Node、Git 或执行发布脚本。
+
+管理端每小时缓存一次公开 Release 目录，只展示清单/协议校验通过的固定版本。
+发现版本不触发安装。缺少独立 manifest.json 的旧 Release 不改写附件；首次升级由
+Agent 使用完整新运行包完成，之后可从 UI 升级。

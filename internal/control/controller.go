@@ -361,6 +361,10 @@ func (c *Controller) admin(w http.ResponseWriter, r *http.Request) {
 		err = c.resume(r.Context(), request.Instance, request.Epoch)
 	case "/final-begin", "/final-stop", "/final-frozen", "/final-snapshot", "/final-complete", "/final-resume", "/final-verify":
 		err = c.finalAction(r.Context(), r.URL.Path, request.Instance, request.Epoch, request.Operation)
+	case "/maintenance-begin", "/maintenance-end":
+		err = c.maintenance(r.Context(), r.URL.Path, request.Operation, request.Instance, request.Epoch)
+	case "/handover-force":
+		err = c.forceClaim(r.Context(), request.Instance, request.Epoch, request.Operation)
 	case "/handover-request", "/handover-release", "/handover-claim", "/handover-validating", "/handover-bind", "/handover-start", "/handover-online", "/handover-resume", "/handover-cancel":
 		err = c.handoverAction(r.Context(), r.URL.Path, request.Instance, request.Epoch, request.Operation)
 	default:

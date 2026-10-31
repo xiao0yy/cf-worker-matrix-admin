@@ -1,0 +1,216 @@
+.management {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin: 24px 0 36px;
+  overflow: hidden;
+}
+.management > .panel-heading {
+  padding: 24px 28px 12px;
+}
+.management-tabs {
+  display: flex;
+  gap: 24px;
+  padding: 0 28px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+}
+.management-tabs button {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 16px 0 13px;
+  white-space: nowrap;
+  color: var(--muted);
+  border-bottom: 3px solid transparent;
+}
+.management-tabs button[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.management [role="tabpanel"] {
+  padding: 24px 28px 28px;
+  min-height: 230px;
+}
+#management-error:not(:empty) {
+  margin: 16px 28px;
+  color: var(--red);
+}
+.maintenance-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.inline-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.7;
+  margin: 0;
+}
+.inline-check input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  margin: 3px 0;
+  accent-color: var(--accent);
+}
+.maintenance-list {
+  margin-top: 24px;
+}
+.maintenance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+}
+.maintenance-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+}
+.maintenance-row > button {
+  flex-shrink: 0;
+}
+.snapshot-id {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.task-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.task-error {
+  color: var(--red);
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+}
+.task-detail {
+  font-size: 12px;
+  margin-top: 8px;
+}
+.task-detail pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--canvas);
+  padding: 16px;
+  border-radius: 8px;
+}
+.task-detail summary {
+  color: var(--muted);
+  cursor: pointer;
+}
+.version-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 40px;
+  margin-bottom: 24px;
+}
+.version-summary strong {
+  display: block;
+  font-family: "Matrix Admin Display", sans-serif;
+  font-size: 26px;
+}
+.version-summary p {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--muted);
+}
+#runtime-release {
+  flex: 1;
+  min-width: 160px;
+  max-width: 340px;
+}
+.retention-inputs {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin: 24px 0;
+}
+.retention-inputs label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.retention-inputs input {
+  width: 90px;
+}
+.disaster-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 0 28px;
+}
+.disaster-entry strong,
+.disaster-entry span {
+  display: block;
+}
+.disaster-entry span {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.takeover-dialog {
+  max-width: 640px;
+}
+#takeover-form {
+  display: grid;
+  gap: 18px;
+}
+#takeover-form > label:not(.inline-check) {
+  display: grid;
+  gap: 7px;
+}
+#takeover-form fieldset {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+}
+#takeover-form legend {
+  padding: 0 8px;
+  font-weight: 600;
+}
+#takeover-isolated {
+  display: grid;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 680px) {
+  .management > .panel-heading,
+  .management [role="tabpanel"] {
+    padding: 20px 16px;
+  }
+  .management-tabs {
+    padding: 0 16px;
+    gap: 20px;
+  }
+  .version-summary {
+    gap: 16px;
+    flex-direction: column;
+  }
+  .maintenance-row {
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .disaster-entry {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .maintenance-toolbar > button {
+    min-height: 42px;
+  }
+}

@@ -32,7 +32,32 @@ const actions = {
     "仅限归属释放之前；若备份任务还在执行会拒绝操作。恢复后还需取消目标请求，并将 Cloudflare 入口切回源实例。",
   ],
 };
+Object.assign(
+  actions,
+  Object.fromEntries(
+    Object.entries({
+      preflight: "切换预检",
+      "backup-now": "立即备份",
+      "restore-drill": "恢复演练",
+      "upgrade-runtime": "升级运行程序",
+      "refresh-config": "刷新备用机配置",
+      "force-takeover": "强制接管",
+      "storage-plan": "生成备份清理计划",
+      "storage-apply": "执行备份清理",
+      "cleanup-plan": "生成本地清理计划",
+      "cleanup-apply": "清理旧实例数据",
+      "health-check": "检查业务状态",
+      "confirm-delivery": "记录双向验证",
+      "maintenance-recover": "结束存储维护",
+      "task-cancel": "取消任务",
+      "task-retry": "重试任务",
+      "handover-pause": "暂停切换推进",
+      "handover-continue": "继续切换推进",
+    }).map(([k, v]) => [k, [v, ""]]),
+  ),
+);
 const phaseNames = {
+  MAINTENANCE: "存储维护中",
   ONLINE: "在线",
   REQUESTED: "等待源实例响应",
   QUIESCING: "正在停写",
@@ -143,8 +168,11 @@ function instanceName(i) {
     "未知实例"
   );
 }
+function publicIP(i) {
+  return i?.info?.public_ip || i?.agent?.public_address?.ip || "";
+}
 function instanceLabel(i) {
-  return `${instanceName(i)}${i?.info?.public_ip ? " · " + i.info.public_ip : ""} [${i?.id || ""}]`;
+  return `${instanceName(i)}${publicIP(i) ? " · " + publicIP(i) : ""} [${i?.id || ""}]`;
 }
 function findInstance(id) {
   return snapshot?.instances.find((i) => i.id === id);
@@ -323,7 +351,7 @@ function renderOverview() {
               ? "暂无服务归属"
               : "—"),
   );
-  text("owner-ip", owner?.info?.public_ip || (owner ? "未登记公网 IP" : ""));
+  text("owner-ip", publicIP(owner) || (owner ? "未登记公网 IP" : ""));
   text("owner-seen", owner ? ago(owner.report?.reported_at) : "尚未上报");
   text("owner-version", owner?.agent?.software?.version || "尚未上报");
   $("owner-details").disabled = !owner;
@@ -381,11 +409,7 @@ function renderOverview() {
     name.dataset.focusKey = i.id;
     copy.append(
       name,
-      element(
-        "span",
-        "machine-meta mono",
-        i.info?.public_ip || "未登记公网 IP",
-      ),
+      element("span", "machine-meta mono", publicIP(i) || "未登记公网 IP"),
     );
     machine.append(copy);
     const [state, color] = role(i),
@@ -562,7 +586,7 @@ function render() {
       const option = element(
         "option",
         "",
-        instanceName(i) + (i.info?.public_ip ? " · " + i.info.public_ip : ""),
+        instanceName(i) + (publicIP(i) ? " · " + publicIP(i) : ""),
       );
       option.value = i.id;
       return option;
@@ -576,6 +600,7 @@ function render() {
   renderTools();
   renderSwitch();
   renderReceipt();
+  window.Management?.load();
   text("raw", snapshot || {});
   if ($("instance-dialog").open && findInstance(infoTarget))
     renderInstanceDetail();
@@ -595,6 +620,7 @@ function navigate(page) {
   if (location.hash !== "#" + page) history.replaceState(null, "", "#" + page);
   $(page + "-title").focus({ preventScroll: true });
   if (page === "switch") renderSwitch();
+  window.Management?.load();
   syncHandoverVisibility();
 }
 
@@ -635,6 +661,13 @@ function switchBlocker(i) {
     owner.report.bound_epoch !== snapshot.control.epoch
   )
     return "请先确认源实例正常在线，才能发起正常交接。";
+  const pre = i.agent?.preflight;
+  if (
+    !pre?.ready ||
+    pre.epoch !== snapshot.control.epoch ||
+    Date.now() - Date.parse(pre.checked_at) > 600000
+  )
+    return "先执行切换预检，检查镜像、备份和磁盘空间。";
   if (i.report.serving !== false)
     return "目标实例仍报告正在服务，请先检查归属。";
   return "";
@@ -642,6 +675,12 @@ function switchBlocker(i) {
 function renderSwitch() {
   const c = snapshot?.control;
   const model = window.Handover.derive(snapshot, currentStatus());
+  text(
+    "switch-intro",
+    model?.forced
+      ? "从选定备份恢复；旧写入实例须先在 VPS 平台关闭或完全隔离。"
+      : "先完成旧实例的最终备份，再让新实例接管服务。",
+  );
   const active =
     !!model && (c.phase !== "ONLINE" || dismissedHandover !== model.id);
   const demo = !$("handover-demo").hidden;
@@ -693,7 +732,7 @@ function renderSwitch() {
     const copy = element("span", "target-copy");
     copy.append(
       element("strong", "", instanceName(i)),
-      element("small", "", i.info?.public_ip || "未登记公网 IP"),
+      element("small", "", publicIP(i) || "未登记公网 IP"),
       element("small", "", blocked || "实例与指令轮询报告有效"),
     );
     label.append(
@@ -701,6 +740,14 @@ function renderSwitch() {
       copy,
       badge(blocked ? "暂不可切换" : "可作为目标", blocked ? "warn" : "good"),
     );
+    if (blocked && i.agent?.management_protocol === 1) {
+      const prepare = button("执行切换预检", (event) => {
+        event?.preventDefault();
+        window.Management?.queue(i.id, "preflight", {});
+      });
+      prepare.disabled = !!commandBlocker(i);
+      label.append(prepare);
+    }
     return label;
   });
   replaceContent(
@@ -809,7 +856,7 @@ function startReview() {
     target: target.id,
     expected: expectedState(),
     bound_epoch: target.report.bound_epoch,
-    public_ip: target.info?.public_ip || "",
+    public_ip: publicIP(target) || "",
     operation: "move-" + crypto.randomUUID(),
   };
   $("route").checked = false;
@@ -818,7 +865,7 @@ function startReview() {
   text("review-target", instanceName(target));
   text(
     "review-ip",
-    target.info?.public_ip || "未登记公网 IP，请先确认目标机器的地址",
+    publicIP(target) || "未登记公网 IP，请先确认目标机器的地址",
   );
   text("review-error", "");
   $("review-dns").hidden = !snapshot.capabilities?.dns;
@@ -835,7 +882,7 @@ function reviewValid() {
     reviewContext &&
     sameState(reviewContext.expected) &&
     reviewContext.bound_epoch === target?.report?.bound_epoch &&
-    reviewContext.public_ip === (target?.info?.public_ip || "") &&
+    reviewContext.public_ip === (publicIP(target) || "") &&
     !switchBlocker(target)
   );
 }
@@ -892,6 +939,7 @@ async function submitSwitch() {
   await send(command);
 }
 function renderTools() {
+  window.Management?.render();
   const i = selected();
   $("tool-target-status").replaceChildren(
     i ? badge(...role(i)) : element("span", "small muted", "等待实例上报"),
@@ -1188,6 +1236,9 @@ function fillInstanceInfo(force = false) {
   infoDirty = false;
   $("instance-name").value = i?.info?.name || "";
   $("instance-ip").value = i?.info?.public_ip || "";
+  $("instance-ip").placeholder = publicIP(i)
+    ? "自动探测：" + publicIP(i)
+    : "留空使用自动探测";
   text("instance-info-target", i?.id || "请选择实例");
 }
 function renderInstanceDetail() {
@@ -1198,7 +1249,7 @@ function renderInstanceDetail() {
   const parts = [
     badge(status, tone),
     detailList([
-      ["公网 IP", i.info?.public_ip || "未登记"],
+      ["公网 IP", publicIP(i) || "未登记"],
       ["主机名", i.agent?.host?.hostname || i.report?.hostname],
       ["服务报告", time(i.report?.reported_at)],
       ["指令轮询", time(i.agent?.reported_at)],
@@ -1315,7 +1366,7 @@ async function readDNS() {
     dnsRecord = (await api("/api/dns")).record;
     text("dns-state", dnsRecord.name + "\n当前回源 IP：" + dnsRecord.content);
     $("ip").value =
-      findInstance(reviewContext?.target)?.info?.public_ip || dnsRecord.content;
+      publicIP(findInstance(reviewContext?.target)) || dnsRecord.content;
   } catch (e) {
     dnsRecord = null;
     text("dns-message", e.message);

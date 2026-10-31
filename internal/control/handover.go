@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type TargetOperation struct {
@@ -18,7 +19,7 @@ type TargetOperation struct {
 
 func operationMatches(raw json.RawMessage, want FinalOperation) bool {
 	var op FinalOperation
-	return json.Unmarshal(raw, &op) == nil && op.Mode == "planned" && want.Mode == "planned" && op.ID == want.ID && op.Source == want.Source && op.Target == want.Target && op.Epoch == want.Epoch && op.NextEpoch == want.NextEpoch
+	return json.Unmarshal(raw, &op) == nil && (op.Mode == "planned" || op.Mode == "forced") && want.Mode == op.Mode && op.ID == want.ID && op.Source == want.Source && op.Target == want.Target && op.Epoch == want.Epoch && op.NextEpoch == want.NextEpoch
 }
 func (c *Controller) saveTarget(t *TargetOperation, blocked bool) error {
 	c.mu.Lock()
@@ -104,6 +105,23 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 		}
 		if s.Phase != "ONLINE" || s.Owner == instance || s.Owner == "" || s.Epoch != epoch || epoch == ^uint64(0) || (j.Final != nil && j.Final.Phase != "RETIRED") {
 			return errors.New("source is not an idle owner or target is not a standby")
+		}
+
+		var pre struct {
+			Schema   int    `json:"schema"`
+			Instance string `json:"instance_id"`
+			Cluster  string `json:"cluster_id"`
+			Epoch    uint64 `json:"epoch"`
+			At       string `json:"checked_at"`
+			Ready    bool   `json:"ready"`
+		}
+		raw, er := os.ReadFile(filepath.Join(c.cfg.StateDir, "preflight.json"))
+		if er != nil || json.Unmarshal(raw, &pre) != nil || pre.Schema != 1 || !pre.Ready || pre.Instance != instance || pre.Cluster != c.cfg.Cluster || pre.Epoch != epoch {
+			return errors.New("target preflight required before stopping the source")
+		}
+		at, er := time.Parse(time.RFC3339Nano, pre.At)
+		if er != nil || c.now().Sub(at) > 10*time.Minute || c.now().Sub(at) < 0 {
+			return errors.New("target preflight expired")
 		}
 		for _, service := range c.services() {
 			running, e := c.docker.Inspect(ctx, service)
@@ -202,7 +220,7 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 	if !operationMatches(s.Operation, t.FinalOperation) {
 		return errors.New("remote operation is different or closed")
 	}
-	if !validFinalReceipt(remote, c.cfg.Cluster) {
+	if !validRecovery(remote, c.cfg.Cluster) {
 		return errors.New("remote final recovery receipt is incomplete")
 	}
 	copy := *t
@@ -371,7 +389,7 @@ func (c *Controller) bindDeployment(ctx context.Context, t TargetOperation) erro
 		Operation   string `json:"operation_id"`
 		Consistency string `json:"consistency"`
 	}
-	if json.Unmarshal(b, &point) != nil || point.Protocol != 2 || point.Schema != 2 || point.Snapshot != t.Receipt.Snapshot || point.Operation != t.ID || point.Consistency != "globally-quiesced" || point.Control.Cluster != c.cfg.Cluster || point.Control.Instance != t.Source || point.Control.Epoch != t.Epoch || !strings.HasPrefix(point.Image, "sha256:") || !hex64(strings.TrimPrefix(point.Image, "sha256:")) || !strings.HasPrefix(point.Telegram.Image, "sha256:") || !hex64(strings.TrimPrefix(point.Telegram.Image, "sha256:")) {
+	if json.Unmarshal(b, &point) != nil || point.Protocol != 2 || point.Schema != 2 || point.Snapshot != t.Receipt.Snapshot || (t.Mode == "planned" && (point.Operation != t.ID || point.Consistency != "globally-quiesced")) || point.Control.Cluster != c.cfg.Cluster || point.Control.Instance != t.Receipt.Instance || point.Control.Epoch != t.Receipt.Epoch || !strings.HasPrefix(point.Image, "sha256:") || !hex64(strings.TrimPrefix(point.Image, "sha256:")) || !strings.HasPrefix(point.Telegram.Image, "sha256:") || !hex64(strings.TrimPrefix(point.Telegram.Image, "sha256:")) {
 		return errors.New("released point identity or images mismatch")
 	}
 	var probe struct {
@@ -381,7 +399,7 @@ func (c *Controller) bindDeployment(ctx context.Context, t TargetOperation) erro
 		Consistency string `json:"consistency"`
 	}
 	b, err = os.ReadFile(filepath.Join(root, "recovery-state", "result.json"))
-	if err != nil || json.Unmarshal(b, &probe) != nil || !probe.Matrix || !probe.Telegram || probe.Production || probe.Consistency != "globally-quiesced" {
+	if err != nil || json.Unmarshal(b, &probe) != nil || !probe.Matrix || !probe.Telegram || probe.Production || probe.Consistency != point.Consistency {
 		return errors.New("isolated database validation report missing")
 	}
 	services := append([]Service(nil), c.cfg.Services...)

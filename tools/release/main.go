@@ -227,8 +227,11 @@ func build(ctx context.Context, tag, out, dependency string, dev bool) error {
 	if e = local.Copy(filepath.Join(tree, "AGENT.md"), filepath.Join(assets, "AGENT.md")); e != nil {
 		return e
 	}
+	if e = local.Copy(filepath.Join(tree, "manifest.json"), filepath.Join(assets, "manifest.json")); e != nil {
+		return e
+	}
 	var sums string
-	for _, n := range []string{"AGENT.md", "matrix-admin-linux-amd64.tar.gz"} {
+	for _, n := range []string{"AGENT.md", "matrix-admin-linux-amd64.tar.gz", "manifest.json"} {
 		hash, e := local.FileHash(filepath.Join(assets, n))
 		if e != nil {
 			return e

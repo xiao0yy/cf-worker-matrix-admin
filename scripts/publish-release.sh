@@ -6,7 +6,7 @@ assets=$(realpath "${1:?asset directory}")
 expected_commit=$(git rev-parse HEAD)
 remote_commit=$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)
 [[ "$remote_commit" == "$expected_commit" ]] || { echo 'Tag moved since tests'; exit 1; }
-[[ $(find "$assets" -maxdepth 1 -type f | wc -l) -eq 4 ]] || { echo 'Unexpected build assets'; exit 1; }
+[[ $(find "$assets" -maxdepth 1 -type f | wc -l) -eq 5 ]] || { echo 'Unexpected build assets'; exit 1; }
 (cd "$assets" && sha256sum --strict -c SHA256SUMS)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
@@ -24,16 +24,16 @@ fi
 # GitHub's UI may already be public while the tag-triggered build is still running.
 # Complete it in place; never hide it or overwrite a previously uploaded asset.
 for name in $(jq -r '.assets[].name' "$stage/release.json"); do
-  case "$name" in AGENT.md|SHA256SUMS|matrix-admin-linux-amd64.tar.gz) ;; *) echo 'Unexpected existing asset'; exit 1;; esac
+  case "$name" in AGENT.md|SHA256SUMS|matrix-admin-linux-amd64.tar.gz|manifest.json) ;; *) echo 'Unexpected existing asset'; exit 1;; esac
 done
 mkdir "$stage/remote"
-for name in AGENT.md SHA256SUMS matrix-admin-linux-amd64.tar.gz; do
+for name in AGENT.md SHA256SUMS matrix-admin-linux-amd64.tar.gz manifest.json; do
   if jq -e --arg name "$name" '.assets | any(.name == $name)' "$stage/release.json" >/dev/null; then
     gh release download "$RELEASE_TAG" --pattern "$name" --dir "$stage/remote"
     cmp "$assets/$name" "$stage/remote/$name" || { echo 'Existing release asset differs'; exit 1; }
   fi
 done
-for name in AGENT.md SHA256SUMS matrix-admin-linux-amd64.tar.gz; do
+for name in AGENT.md SHA256SUMS matrix-admin-linux-amd64.tar.gz manifest.json; do
   if ! jq -e --arg name "$name" '.assets | any(.name == $name)' "$stage/release.json" >/dev/null; then
     gh release upload "$RELEASE_TAG" "$assets/$name"
     gh release download "$RELEASE_TAG" --pattern "$name" --dir "$stage/remote"

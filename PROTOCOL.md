@@ -55,4 +55,30 @@ R2 不承担过程调度：源和目标原 handover worker 独立工作。本机
 - 本地磁盘丢失：远端 CLAIMED 阻止重复执行，并标 UNKNOWN；新的实例仍须正常恢复身份，不能复用旧身份取得归属。
 - Git 升级：协议字段/schema 不兼容时拒绝指令；poller capability 版本必须匹配 Worker 支持版本。静态资源不含 token。
 
-当前协议不实现强制接管、自动清理、跨 R2/DNS 事务、集群软件自动升级或基于心跳的选主。
+当前协议不实现跨 R2/DNS 事务、软件自动安装或基于心跳的选主。
+
+## 维护能力扩展（management_protocol = 1）
+
+mailbox 协议仍为 1；新增能力以 agent 报告的 management_protocol 和 actions
+列表判断，旧实例不会收到不支持的动作。新增指令使用 `parameters` 严格结构，
+不同时接受 operation_id/source_epoch。Worker、mailbox 和任务执行器分别校验。
+
+动作：preflight、backup-now、restore-drill、upgrade-runtime、refresh-config、
+health-check、confirm-delivery、force-takeover、storage-plan/storage-apply、
+cleanup-plan/cleanup-apply、maintenance-recover，以及 task-cancel/task-retry、
+handover-pause/handover-continue。只允许固定参数，没有执行任意命令的入口。
+
+APPLIED 对维护任务表示本地持久队列已接收，结果在
+`cluster/C/tasks/I/ID.json`。任务使用同一 command ID，阶段与结果经 fsync 后
+由独立 worker/mailbox 单调发布，旧报告不能覆盖更新结果。仅 FAILED、CANCELLED、
+INTERRUPTED 可显式重试；执行时仍校验原 authority，只有同一强制接管或维护操作
+允许对账自身已提交的状态。任务不因管理指令 TTL 到期而取消。
+
+强制接管参数包含固定 snapshot_id/point_sha256、isolated_instances、
+isolation_method（powered-off / fully-isolated）、note、accept_data_loss。
+控制器核对目标非当前 owner、旧写者隔离声明、目标容器停止、恢复点身份与哈希，
+再进行 ETag CAS。声明是操作者提供的外部事实，程序不能证明 VPS 已经断电。
+
+`recovery/v2/retired/ID.json` 为不可变淘汰标记，读取器拒绝这些点；配置和旧索引
+保留用于审计。空间计划只在执行实例本地私密目录保存，R2 task 报告其清单与哈希。
+`observations/releases.json` 缓存公开版本信息，不属于运行授权。

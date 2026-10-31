@@ -31,13 +31,15 @@ func run(ctx context.Context, args []string) error {
   resume --instance ID --epoch N     Explicitly resume the current owner
   final --operation ID --instance ID --epoch N
   source-resume --operation ID --instance ID --epoch N
-  handover                Advance an explicitly requested planned handover
+  handover                Advance an explicitly requested planned or forced handover
+  preflight [--point ID --sha256 HASH]  Verify standby readiness
+  handover-pause / handover-continue --instance ID
   upgrade --from DIR [--apply]       Verify or install a complete native runtime
   download --version X.Y.Z --output DIR   Fetch a verified immutable runtime
   verify --from DIR       Verify a runtime's complete file inventory
   config-example          Print the user's only bootstrap input template
 Host commands accept --root /opt/matrix. System prerequisites are prepared by the Agent.
-The control and mailbox subcommands are systemd entrypoints of this same program.`)
+The control, mailbox and tasks subcommands are systemd entrypoints of this same program.`)
 		return nil
 	}
 	cmd := args[0]
@@ -78,6 +80,7 @@ The control and mailbox subcommands are systemd entrypoints of this same program
 	}
 	allowed := map[string]string{
 		"download": "version output sha256", "verify": "from", "doctor": "root", "status": "root",
+		"tasks": "root", "preflight": "root point sha256", "handover-pause": "root instance", "handover-continue": "root instance",
 		"prepare": "root preflight", "backup": "root full", "restore": "root point sha256",
 		"fence": "root instance", "resume": "root instance epoch", "final": "root operation instance epoch",
 		"source-resume": "root operation instance epoch", "handover": "root", "upgrade": "root from apply",
@@ -124,6 +127,16 @@ The control and mailbox subcommands are systemd entrypoints of this same program
 		return errors.New("host mutation requires root")
 	}
 	switch cmd {
+	case "tasks":
+		return e.Tasks(ctx)
+	case "preflight":
+		v, err := e.Preflight(ctx, *point, *hash)
+		if err != nil {
+			return err
+		}
+		return output(v)
+	case "handover-pause", "handover-continue":
+		return e.PauseHandover(ctx, *id, cmd == "handover-pause")
 	case "prepare":
 		return e.Prepare(ctx, *preflight)
 	case "backup":

@@ -100,6 +100,27 @@ test("source may go offline after release without hiding a fresh target recovery
   assert.equal(derive(s, true, now).mode, "running");
 });
 
+test("pausing stops motion without hiding conflicting writers, stale reports or failures", () => {
+  const s = state("VALIDATING");
+  s.instances[1].agent.handover_paused = { paused: true };
+  assert.equal(derive(s, true, now).mode, "paused");
+  assert.equal(derive(s, true, now).flow, "none");
+  s.instances[0].report.serving = true;
+  let m = derive(s, true, now);
+  assert.equal(m.mode, "error");
+  assert.equal(m.title, "交接需要检查");
+  assert.equal(m.flow, "none");
+  s.instances[0].report.serving = false;
+  s.instances[1].agent.reported_at = "2020-01-01T00:00:00Z";
+  m = derive(s, true, now);
+  assert.equal(m.mode, "stale");
+  assert.equal(m.flow, "none");
+  s.instances[1].agent.reported_at = new Date(now).toISOString();
+  s.instances[1].report.error = "restore failed";
+  assert.equal(derive(s, true, now).mode, "error");
+  assert.equal(derive(s, true, now).flow, "none");
+});
+
 test("errors only from this operation stop the active path; clearing them resumes it", () => {
   const s = state("VALIDATING");
   s.instances[1].agent.worker_errors = {

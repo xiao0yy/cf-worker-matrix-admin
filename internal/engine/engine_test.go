@@ -441,6 +441,62 @@ func TestUpgradeResumesAfterGuardStartFailureWithoutNewIdentity(t *testing.T) {
 		t.Fatal("updated potentially written target")
 	}
 }
+func TestUpgradeRetryAfterReloadFailurePreservesDataBinding(t *testing.T) {
+	for _, changeBinding := range []bool{false, true} {
+		t.Run(fmt.Sprint(changeBinding), func(t *testing.T) {
+			e := testEngine(t)
+			e.Host.SystemdDirectory = filepath.Join(e.Host.Root, "units")
+			must(t, os.MkdirAll(e.Host.SystemdDirectory, 0700))
+			source := runtimeFixture(t, "0.3.0")
+			s := Status{Cluster: e.Cluster, Instance: "node-a", Epoch: 7, Blocked: true, Control: &control.State{Owner: "node-a", Epoch: 7, Phase: "ONLINE"}}
+			cfg := fakeController(t, e, &s, nil)
+			journal := control.Journal{Schema: 1, Cluster: e.Cluster, Instance: s.Instance, BoundEpoch: 7, HighEpoch: 7, HighRevision: 20, Blocked: true}
+			path := filepath.Join(cfg.StateDir, "journal.json")
+			must(t, local.JSON(path, journal))
+			fail, stops := true, 0
+			e.Runner = runFunc(func(_ context.Context, c Command) ([]byte, error) {
+				args := strings.Join(c.Args, " ")
+				if args == "stop matrix-control.service" {
+					stops++
+				}
+				if args == "daemon-reload" && fail {
+					fail = false
+					return nil, errors.New("injected reload failure")
+				}
+				return nil, nil
+			})
+			if _, err := e.Upgrade(context.Background(), source, true); err == nil {
+				t.Fatal("reload failure ignored")
+			}
+			var update Update
+			must(t, local.ReadJSON(filepath.Join(e.Host.Root, "agent/pending-update.json"), &update))
+			if update.Phase != "STOPPED" || update.Generation == "" {
+				t.Fatal("missing durable stopped data binding", update.Phase)
+			}
+			journal.HighRevision++
+			journal.Reason = "new observation after restarting the management channel"
+			if changeBinding {
+				journal.Deployment = filepath.Join(e.Host.Root, "generations/replacement")
+			}
+			must(t, local.JSON(path, journal))
+			_, err := e.Upgrade(context.Background(), source, true)
+			if changeBinding {
+				if err == nil {
+					t.Fatal("changed data binding accepted")
+				}
+				return
+			}
+			must(t, err)
+			if stops != 2 {
+				t.Fatal("guard not stopped again before installing", stops)
+			}
+			must(t, local.ReadJSON(path, &journal))
+			if journal.HighRevision != 21 || journal.BoundEpoch != 7 || !journal.Blocked {
+				t.Fatal("journal or generation overwritten")
+			}
+		})
+	}
+}
 func TestPreparePreflightDoesNotContactB2OrCreateIdentity(t *testing.T) {
 	e := testEngine(t)
 	e.ReleaseDir = runtimeFixture(t, "0.2.0")

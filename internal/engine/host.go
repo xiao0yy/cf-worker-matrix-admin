@@ -136,6 +136,7 @@ type Engine struct {
 	Binary     string
 	ReleaseDir string
 	Now        func() time.Time
+	Progress   func(string)
 }
 
 func New(root string) (*Engine, error) {

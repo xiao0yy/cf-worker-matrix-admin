@@ -7,6 +7,7 @@
 | Go 包 | 职责 |
 | --- | --- |
 | internal/control | R2 条件更新、epoch、本地 journal、停止写者、入口守卫 |
+| internal/management | 持久任务契约、队列、取消/重试与单调报告 |
 | internal/mailbox | 管理命令去重、轮询、实例报告 |
 | internal/engine | 准备、快照、上传、恢复、切换及升级编排 |
 | internal/storage | 有界 SigV4 请求，包括空请求体哈希和条件写入 |
@@ -64,7 +65,7 @@ DNS 切换不证明旧实例已停止，Telegram 后台也不依赖 HTTP 流量�
 
 任何启动意图写入后，目标数据库可能已有新消息，禁止重放恢复覆盖它。旧 owner
 在 RELEASED 后不得自行恢复；释放前可通过显式 source-resume 撤销。失联节点
-不能仅凭心跳判死并接管。当前未实现强制接管与自动删除旧数据。
+不能仅凭心跳判死并接管。强制接管通过显式隔离记录和固定恢复点取得新 epoch，详见下文。
 
 ## 更新与故障
 
@@ -78,3 +79,29 @@ resume 恢复当前 owner。pending-update 绑定版本和实例，断点重试�
 
 测试覆盖守卫状态机、条件写入、命令去重、真实 SQLite WAL、restic 临时仓库
 及故障注入；不把这些等同于已完成跨 VPS 的生产切换演练。
+
+## 故障接管与维护
+
+强制接管允许旧 owner 已离线，且允许原计划切换中途失败后选择另一台 standby。
+操作者必须隔离当前 owner、原 source、原 target 中所有可能写入且不是新目标的
+实例。目标先预检恢复点、依赖、B2、空间及镜像，再 CAS 把归属变为新目标和
+下一 epoch，进入 RESTORING → VALIDATING → STARTING → ONLINE。
+它不会伪造干净停机证明，也不把旧在线备份标为跨数据库一致。CAS 回应丢失时按
+同一操作 ID 对账，不重复增加 epoch。STARTING 后只允许修复当前数据，不覆盖恢复。
+
+计划切换前要求目标最近 10 分钟的预检通过；失败重检立即撤销旧 ready 结果。
+恢复时重新按最终快照大小核算空间。备用 nginx 只在入口关闭时更新，校验失败
+恢复原配置。暂停记录跨重启保留，作用于切换 worker，不回滚已完成状态。
+
+任务 worker 与 mailbox、controller 是独立进程。QUEUED → RUNNING →
+SUCCEEDED / FAILED / CANCELLED / INTERRUPTED，任务结果和阶段持久化并报告 R2。
+RUNNING 的进程消失时标记 INTERRUPTED，需显式重试。升级关键安装阶段不取消；
+它不依赖 controller unit，避免重启守卫时杀死升级进程。失败尝试恢复管理通道，
+业务保持 fenced，pending-update 用于同版本续跑。
+
+备份保留计划按时间/数量保护点，执行前再次核对 latest、当前/已完成交接及活跃
+恢复任务。执行要求停用 owner，CAS 进入 MAINTENANCE，阻止新恢复和业务启动。
+先写不可变 retired 标记，再 forget 指定快照、prune、check。中断保持维护态；
+可重试原任务，或通过仓库校验后结束维护，再单独恢复服务。媒体不在清理范围。
+旧机清理必须审阅具体目录，替代实例有新鲜 ONLINE/serving 报告且旧机已停用。
+没有基于心跳超时的自动选主、自动更新或自动删除。

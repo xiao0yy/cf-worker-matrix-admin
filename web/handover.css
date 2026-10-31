@@ -687,3 +687,5 @@
     display: block;
   }
 }
+
+.handover-scene[data-takeover="forced"] .handover-stages {grid-template-columns:repeat(3,minmax(0,1fr));}

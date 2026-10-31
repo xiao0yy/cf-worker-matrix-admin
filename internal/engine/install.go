@@ -129,12 +129,15 @@ ReadWritePaths=%s /run/matrix-control
 [Install]
 WantedBy=multi-user.target
 `, bin, cfg, bin, cfg, filepath.Join(e.Host.Root, "deploy/control/state"))}
-	for _, job := range []string{"mailbox", "handover", "backup"} {
+	for _, job := range []string{"mailbox", "handover", "backup", "tasks"} {
 		args := job + " --root " + e.Host.Root
 		if job == "mailbox" {
 			args = "mailbox --config " + cfg
 		}
 		units["matrix-"+job+".service"] = "[Unit]\nDescription=Matrix " + job + " task\nAfter=matrix-control.service network-online.target\nRequires=matrix-control.service\n" + common + "ExecStart=" + bin + " " + args + "\n"
+		if job == "tasks" {
+			units["matrix-"+job+".service"] = strings.ReplaceAll(units["matrix-"+job+".service"], "Requires=matrix-control.service\n", "")
+		}
 		interval := "15s"
 		if job == "backup" {
 			interval = "15min"
@@ -294,7 +297,7 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 	if err = e.system(ctx, "daemon-reload"); err != nil {
 		return err
 	}
-	if err = e.system(ctx, "enable", "--now", "matrix-control.service", "matrix-mailbox.timer", "matrix-handover.timer"); err != nil {
+	if err = e.system(ctx, "enable", "--now", "matrix-control.service", "matrix-mailbox.timer", "matrix-handover.timer", "matrix-tasks.timer"); err != nil {
 		return err
 	}
 	if err = e.system(ctx, "reload", e.Host.NginxService); err != nil {

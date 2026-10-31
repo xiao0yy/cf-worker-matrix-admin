@@ -66,3 +66,33 @@ func TestTransportFailuresDoNotExposeCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestListSignsPaginationAndRejectsForeignKeys(t *testing.T) {
+	c := &Client{Endpoint: "https://example.r2.cloudflarestorage.com", Bucket: "fixture", Region: "auto", Access: "test", Secret: "test"}
+	calls := 0
+	c.HTTP = &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		q := r.URL.Query()
+		if q.Get("list-type") != "2" || q.Get("prefix") != "cluster/test/" || r.Header.Get("Authorization") == "" {
+			t.Fatal("unsigned or unscoped list", r.URL)
+		}
+		body := `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>a+/=</NextContinuationToken><Contents><Key>cluster/test/a</Key></Contents></ListBucketResult>`
+		if calls == 2 {
+			if q.Get("continuation-token") != "a+/=" {
+				t.Fatal("cursor not preserved")
+			}
+			body = `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>cluster/test/b</Key></Contents></ListBucketResult>`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	keys, err := c.List(context.Background(), "cluster/test/")
+	if err != nil || strings.Join(keys, ",") != "cluster/test/a,cluster/test/b" {
+		t.Fatal(keys, err)
+	}
+	c.HTTP = &http.Client{Transport: transport(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`<ListBucketResult><Contents><Key>cluster/another/private</Key></Contents></ListBucketResult>`))}, nil
+	})}
+	if _, err = c.List(context.Background(), "cluster/test/"); err == nil {
+		t.Fatal("foreign prefix accepted")
+	}
+}

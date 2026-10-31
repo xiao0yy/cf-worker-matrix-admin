@@ -173,6 +173,26 @@ func (e *Engine) SourceResume(ctx context.Context, op, id string, epoch uint64) 
 	return err
 }
 func (e *Engine) Handover(ctx context.Context) (err error) {
+	if _, er := os.Stat(filepath.Join(e.Host.Root, "agent/handover-paused.json")); er == nil {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if _, er := os.Stat(filepath.Join(e.Host.Root, "agent/handover-paused.json")); er == nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	unlock, err := local.Lock(filepath.Join(e.Host.Root, "agent/operation.lock"))
 	if err != nil {
 		return err
@@ -198,7 +218,7 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 	} else if s.Control.Completed != nil {
 		op = *s.Control.Completed
 	}
-	if op.ID == "" || op.Mode != "planned" {
+	if op.ID == "" || (op.Mode != "planned" && op.Mode != "forced") {
 		return nil
 	}
 	if !local.SafeID(op.ID) {
@@ -211,7 +231,7 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 	step := "inspect"
 	defer func() { e.recordError(base, op.ID, step, err) }()
 	ctl := func(action string) error { return e.action(ctx, action, op.ID, s.Instance, op.Epoch) }
-	if op.Source == s.Instance {
+	if op.Mode == "planned" && op.Source == s.Instance {
 		switch s.Control.Phase {
 		case "REQUESTED", "QUIESCING", "QUIESCED", "SNAPSHOTTING":
 			step = "final-backup"
@@ -335,7 +355,7 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 		return ctl("handover-start")
 	case "STARTING":
 		step = "health-and-online"
-		if err = ctl("handover-online"); err != nil {
+		if err = e.wait(ctx, 3*time.Minute, func() error { return ctl("handover-online") }); err != nil {
 			return err
 		}
 	case "ONLINE":

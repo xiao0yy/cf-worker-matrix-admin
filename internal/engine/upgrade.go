@@ -8,6 +8,7 @@ import (
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type Update struct {
@@ -15,8 +16,24 @@ type Update struct {
 	Runtime         Installed `json:"runtime"`
 	Identity        string    `json:"identity_sha256"`
 	Journal         string    `json:"journal_sha256"`
+	Generation      string    `json:"generation_sha256,omitempty"`
 	Phase           string    `json:"phase"`
 	BackupWasActive bool      `json:"backup_was_active"`
+}
+
+// Polling may advance observations while a failed update remains fenced. Keep
+// data ownership, service binding and unfinished operations immutable on retry.
+func upgradeGeneration(j control.Journal) string {
+	j.HighRevision, j.HighEpoch, j.Reason = 0, 0, ""
+	return local.Digest(release.JSON(j))
+}
+
+func sameUpdateGeneration(update Update, journal control.Journal, path string) bool {
+	if update.Generation != "" {
+		return update.Generation == upgradeGeneration(journal)
+	}
+	hash, err := local.FileHash(path)
+	return err == nil && hash == update.Journal
 }
 
 func (e *Engine) Upgrade(ctx context.Context, source string, apply bool) (result any, err error) {
@@ -72,8 +89,7 @@ func (e *Engine) Upgrade(ctx context.Context, source string, apply bool) (result
 			return nil, errors.New("resume the same pending update and instance")
 		}
 		if update.Journal != "" && update.Phase == "STOPPED" {
-			hash, err := local.FileHash(filepath.Join(cfg.StateDir, "journal.json"))
-			if err != nil || hash != update.Journal {
+			if !sameUpdateGeneration(update, journal, filepath.Join(cfg.StateDir, "journal.json")) {
 				return nil, errors.New("journal changed after update stop; inspect before retry")
 			}
 		}
@@ -86,7 +102,7 @@ func (e *Engine) Upgrade(ctx context.Context, source string, apply bool) (result
 		if err != nil {
 			return nil, err
 		}
-		if !s.Blocked || s.Serving || s.Control == nil || s.Final != nil && s.Final.Phase != "RETIRED" {
+		if !s.Blocked || s.Serving || s.Control == nil || s.Control.Phase != "ONLINE" || s.Final != nil && s.Final.Phase != "RETIRED" {
 			return nil, errors.New("controller does not authorize a code upgrade in this phase")
 		}
 	}
@@ -98,6 +114,18 @@ func (e *Engine) Upgrade(ctx context.Context, source string, apply bool) (result
 	if err != nil {
 		return nil, err
 	}
+
+	// Even a failed installation must restore the management channel. Business
+	// admission remains fenced; a pending update is retried explicitly.
+	defer func() {
+		if err != nil {
+			recovery, done := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer done()
+			_ = e.system(recovery, "daemon-reload")
+			_ = e.system(recovery, "start", "matrix-control.service")
+			_ = e.system(recovery, "enable", "--now", "matrix-mailbox.timer", "matrix-tasks.timer")
+		}
+	}()
 	if !resume {
 		_, active := e.run(ctx, e.Host.Systemctl, "is-active", "--quiet", "matrix-backup.timer")
 		if active != nil {
@@ -137,11 +165,27 @@ func (e *Engine) Upgrade(ctx context.Context, source string, apply bool) (result
 			return nil, err
 		}
 		update.Phase = "STOPPED"
+		update.Generation = upgradeGeneration(stopped)
 		if err = local.JSON(pending, update); err != nil {
 			return nil, err
 		}
 	}
 	if update.Phase == "STOPPED" {
+		if resume {
+			// Failure recovery restarts the management channel. Stop its guard
+			// again and recheck the durable binding before replacing unit files.
+			if err = e.system(ctx, "stop", "matrix-control.service"); err != nil {
+				return nil, err
+			}
+			var stopped control.Journal
+			path := filepath.Join(cfg.StateDir, "journal.json")
+			if err = local.ReadJSON(path, &stopped); err != nil {
+				return nil, err
+			}
+			if !sameUpdateGeneration(update, stopped, path) {
+				return nil, errors.New("data binding changed during update retry")
+			}
+		}
 		if err = e.writeUnits(installed); err != nil {
 			return nil, err
 		}
@@ -182,7 +226,7 @@ func (e *Engine) Upgrade(ctx context.Context, source string, apply bool) (result
 	if update.Phase != "COMPLETE" {
 		return nil, errors.New("unknown update phase")
 	}
-	if err = e.system(ctx, "enable", "--now", "matrix-mailbox.timer", "matrix-handover.timer"); err != nil {
+	if err = e.system(ctx, "enable", "--now", "matrix-mailbox.timer", "matrix-handover.timer", "matrix-tasks.timer"); err != nil {
 		return nil, err
 	}
 	if update.BackupWasActive {

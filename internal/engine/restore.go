@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"github.com/xiao0yy/cf-worker-matrix-admin/internal/control"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
 	"os"
@@ -35,6 +34,7 @@ func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, 
 	if _, err := release.Current(e.ReleaseDir); err != nil {
 		return result, err
 	}
+	e.progress("read-recovery-point")
 	point, raw, err := e.readPoint(ctx, snapshot, hash)
 	if err != nil {
 		return result, err
@@ -61,9 +61,16 @@ func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, 
 	if err != nil {
 		return result, err
 	}
+	if s, er := e.status(ctx); er != nil || s.Control == nil || s.Control.Phase == "MAINTENANCE" {
+		return result, errors.New("restore requires available authority outside storage maintenance")
+	}
 	if err = e.verifyRepository(ctx, repo); err != nil {
 		return result, err
 	}
+	if _, err = e.snapshotSpace(ctx, repo, point.Snapshot); err != nil {
+		return result, err
+	}
+	e.progress("download-and-verify-databases")
 	if err = e.downloadData(ctx, repo, point.Snapshot, bundle, work); err != nil {
 		return result, err
 	}
@@ -72,6 +79,7 @@ func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, 
 			return result, err
 		}
 	}
+	e.progress("isolated-database-startup")
 	if err = e.probe(ctx, bundle, meta, filepath.Join(work, "probe")); err != nil {
 		return result, err
 	}
@@ -114,20 +122,5 @@ func (e *Engine) activateFiles(ctx context.Context, r Restored, p Point) error {
 			return err
 		}
 	}
-	for _, name := range []string{"matrix.conf", "00-matrix-common.conf"} {
-		b, err := os.ReadFile(filepath.Join(r.Root, "deploy/nginx", name))
-		if err != nil {
-			return err
-		}
-		var source control.Config
-		if err = local.ReadJSON(filepath.Join(r.Work, "bundle/payload/control/source-local.json"), &source); err != nil {
-			return err
-		}
-		b = []byte(strings.ReplaceAll(string(b), filepath.Dir(source.S3Config), filepath.Join(e.Host.Root, "deploy/control")))
-		current, err := os.ReadFile(filepath.Join(e.Host.NginxDirectory, name))
-		if err != nil || string(b) != string(current) {
-			return errors.New("nginx differs from prepared instance; inspect before activation")
-		}
-	}
-	return nil
+	return e.refreshNginx(ctx, filepath.Join(r.Work, "bundle"))
 }
