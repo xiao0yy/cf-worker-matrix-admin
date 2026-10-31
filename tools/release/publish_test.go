@@ -15,7 +15,9 @@ import (
 )
 
 type githubFixture struct {
-	IsDraft bool `json:"isDraft"`
+	IsDraft bool   `json:"isDraft"`
+	Name    string `json:"name"`
+	Body    string `json:"body"`
 	Assets  []struct {
 		Name string `json:"name"`
 	} `json:"assets"`
@@ -107,11 +109,24 @@ func fakeGitHub(args []string) int {
 				return 1
 			}
 		}
+		state.Name = option("--title")
+		notes, err := os.ReadFile(option("--notes-file"))
+		if err != nil {
+			return 1
+		}
+		state.Body = string(notes)
 		return save()
 	}
 	return 1
 }
-func TestPublisherInterruptedUploadRetriesAndNeverHidesPublishedRelease(t *testing.T) {
+
+type publisherFixture struct {
+	assets, remote string
+	run            func(string) error
+}
+
+func newPublisherFixture(t *testing.T) publisherFixture {
+	t.Helper()
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
 	assets := filepath.Join(root, "assets")
@@ -161,38 +176,96 @@ func TestPublisherInterruptedUploadRetriesAndNeverHidesPublishedRelease(t *testi
 		}
 		return err
 	}
-	if e = run("SHA256SUMS"); e == nil {
+	return publisherFixture{assets: assets, remote: remote, run: run}
+}
+
+func TestPublisherInterruptedUploadRetriesAndNeverHidesPublishedRelease(t *testing.T) {
+	f := newPublisherFixture(t)
+	if e := f.run("SHA256SUMS"); e == nil {
 		t.Fatal("upload failure ignored")
 	}
 	var state githubFixture
-	if e = local.ReadJSON(filepath.Join(remote, "release.json"), &state); e != nil {
+	if e := local.ReadJSON(filepath.Join(f.remote, "release.json"), &state); e != nil {
 		t.Fatal(e)
 	}
 	if !state.IsDraft || len(state.Assets) != 1 {
 		t.Fatal("incomplete release published")
 	}
-	if e = run(""); e != nil {
+	if e := f.run(""); e != nil {
 		t.Fatal(e)
 	}
-	if e = local.ReadJSON(filepath.Join(remote, "release.json"), &state); e != nil {
+	if e := local.ReadJSON(filepath.Join(f.remote, "release.json"), &state); e != nil {
 		t.Fatal(e)
 	}
-	if state.IsDraft || len(state.Assets) != 3 {
+	if state.IsDraft || len(state.Assets) != 3 || state.Name != "Matrix Admin v0.2.0" || state.Body != "notes" {
 		t.Fatal("not published complete")
 	}
-	if e = run(""); e != nil {
+	if e := f.run(""); e != nil {
 		t.Fatal("completed retry failed", e)
 	}
-	if e = os.WriteFile(filepath.Join(remote, "AGENT.md"), []byte("different"), 0600); e != nil {
+	if e := os.WriteFile(filepath.Join(f.remote, "AGENT.md"), []byte("different"), 0600); e != nil {
 		t.Fatal(e)
 	}
-	if e = run(""); e == nil {
+	if e := f.run(""); e == nil {
 		t.Fatal("conflicting published release accepted")
 	}
-	if e = local.ReadJSON(filepath.Join(remote, "release.json"), &state); e != nil {
+	if e := local.ReadJSON(filepath.Join(f.remote, "release.json"), &state); e != nil {
 		t.Fatal(e)
 	}
 	if state.IsDraft {
 		t.Fatal("published release hidden")
+	}
+}
+
+func TestPublisherCompletesPublicReleaseAndRetriesWithoutHidingIt(t *testing.T) {
+	f := newPublisherFixture(t)
+	state := githubFixture{IsDraft: false, Assets: make([]struct {
+		Name string `json:"name"`
+	}, 0)}
+	statefile := filepath.Join(f.remote, "release.json")
+	if e := local.JSON(statefile, state); e != nil {
+		t.Fatal(e)
+	}
+	if e := f.run("SHA256SUMS"); e == nil {
+		t.Fatal("upload failure ignored")
+	}
+	if e := local.ReadJSON(statefile, &state); e != nil {
+		t.Fatal(e)
+	}
+	if state.IsDraft || len(state.Assets) != 1 || state.Body != "" {
+		t.Fatal("public release must stay public and defer notes until all uploads succeed")
+	}
+	if e := f.run(""); e != nil {
+		t.Fatal(e)
+	}
+	if e := local.ReadJSON(statefile, &state); e != nil {
+		t.Fatal(e)
+	}
+	if state.IsDraft || len(state.Assets) != 3 || state.Name != "Matrix Admin v0.2.0" || state.Body != "notes" {
+		t.Fatal("public release was not completed")
+	}
+}
+
+func TestPublisherChecksAllExistingAssetsBeforeUploadingMissingOnes(t *testing.T) {
+	f := newPublisherFixture(t)
+	state := githubFixture{IsDraft: false}
+	state.Assets = append(state.Assets, struct {
+		Name string `json:"name"`
+	}{Name: "matrix-admin-linux-amd64.tar.gz"})
+	statefile := filepath.Join(f.remote, "release.json")
+	if e := local.JSON(statefile, state); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(filepath.Join(f.remote, "matrix-admin-linux-amd64.tar.gz"), []byte("different build"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := f.run(""); e == nil {
+		t.Fatal("conflicting existing build accepted")
+	}
+	if e := local.ReadJSON(statefile, &state); e != nil {
+		t.Fatal(e)
+	}
+	if state.IsDraft || len(state.Assets) != 1 {
+		t.Fatal("release changed before existing assets were validated")
 	}
 }

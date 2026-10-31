@@ -20,7 +20,9 @@ if ! gh release view "$RELEASE_TAG" --json isDraft,assets > "$stage/release.json
   gh release create "$RELEASE_TAG" --verify-tag --draft --title "Matrix Admin $RELEASE_TAG" --notes-file "$assets/notes.md"
   gh release view "$RELEASE_TAG" --json isDraft,assets > "$stage/release.json"
 fi
-# Never turn a published release back into a draft or overwrite an existing asset.
+# Validate every existing asset before adding anything. A release created through
+# GitHub's UI may already be public while the tag-triggered build is still running.
+# Complete it in place; never hide it or overwrite a previously uploaded asset.
 for name in $(jq -r '.assets[].name' "$stage/release.json"); do
   case "$name" in AGENT.md|SHA256SUMS|matrix-admin-linux-amd64.tar.gz) ;; *) echo 'Unexpected existing asset'; exit 1;; esac
 done
@@ -29,14 +31,20 @@ for name in AGENT.md SHA256SUMS matrix-admin-linux-amd64.tar.gz; do
   if jq -e --arg name "$name" '.assets | any(.name == $name)' "$stage/release.json" >/dev/null; then
     gh release download "$RELEASE_TAG" --pattern "$name" --dir "$stage/remote"
     cmp "$assets/$name" "$stage/remote/$name" || { echo 'Existing release asset differs'; exit 1; }
-  else
-    [[ $(jq -r .isDraft "$stage/release.json") == true ]] || { echo 'Published release is incomplete; use a new tag'; exit 1; }
+  fi
+done
+for name in AGENT.md SHA256SUMS matrix-admin-linux-amd64.tar.gz; do
+  if ! jq -e --arg name "$name" '.assets | any(.name == $name)' "$stage/release.json" >/dev/null; then
     gh release upload "$RELEASE_TAG" "$assets/$name"
     gh release download "$RELEASE_TAG" --pattern "$name" --dir "$stage/remote"
     cmp "$assets/$name" "$stage/remote/$name"
   fi
 done
+# Update generated notes only after all artifacts have been downloaded and
+# compared. --draft=false is only needed for a release that is still a draft.
+edit_args=(--title "Matrix Admin $RELEASE_TAG" --notes-file "$assets/notes.md")
 if [[ $(jq -r .isDraft "$stage/release.json") == true ]]; then
-  gh release edit "$RELEASE_TAG" --draft=false --title "Matrix Admin $RELEASE_TAG" --notes-file "$assets/notes.md"
+  edit_args+=(--draft=false)
 fi
+gh release edit "$RELEASE_TAG" "${edit_args[@]}"
 rm "$stage/release.json"
