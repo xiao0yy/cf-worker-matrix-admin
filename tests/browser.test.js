@@ -1,53 +1,422 @@
-import {test} from 'node:test';
-import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
-import vm from 'node:vm';
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import { parseHTML } from "linkedom";
 
-function browser(fetch) {
-  const nodes=new Map();
-  const context=vm.createContext({
-    document:{getElementById(id){if(!nodes.has(id))nodes.set(id,{value:id==='action'?'probe':'',textContent:''});return nodes.get(id);}},
-    location:{protocol:'file:',origin:'null'}, crypto, AbortSignal, fetch,
-    setInterval(){throw Error('file pages must not poll authenticated API');},
+const html = readFileSync(
+  new URL("../web/index.html", import.meta.url),
+  "utf8",
+);
+const script = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+const evaluate = (context, script) => vm.runInContext(script, context);
+const clone = (data) => JSON.parse(JSON.stringify(data));
+
+function browser(fetch = async () => Response.json({}), saved = null) {
+  const { document, HTMLElement } = parseHTML(html);
+  let activeElement = document.body;
+  // Linkedom implements parsing and DOM trees, but not browser focus/dialogs or
+  // the select value setter. Only these platform primitives need a small shim.
+  Object.defineProperty(document, "activeElement", {
+    get: () => activeElement,
   });
-  vm.runInContext(readFileSync(new URL('../web/app.js',import.meta.url),'utf8'),context);
+  HTMLElement.prototype.focus = function () {
+    activeElement = this;
+  };
+  HTMLElement.prototype.scrollIntoView = () => {};
+  for (const node of document.querySelectorAll("dialog")) {
+    node.showModal = () => {
+      node.open = true;
+    };
+    node.close = () => {
+      node.open = false;
+    };
+  }
+  for (const node of document.querySelectorAll("select")) {
+    Object.defineProperty(node, "value", {
+      get() {
+        return (
+          this.querySelector("option[selected]")?.value ||
+          this.querySelector("option")?.value ||
+          ""
+        );
+      },
+      set(value) {
+        for (const option of this.querySelectorAll("option")) {
+          if (option.value === value) option.setAttribute("selected", "");
+          else option.removeAttribute("selected");
+        }
+      },
+    });
+  }
+  const location = { protocol: "file:", origin: "null", hash: "" };
+  const storage = new Map(
+    saved ? [["matrix-admin-v1:null", JSON.stringify(saved)]] : [],
+  );
+  const context = vm.createContext({
+    document,
+    location,
+    crypto,
+    AbortSignal,
+    fetch,
+    console,
+    history: {
+      replaceState(_state, _title, url) {
+        location.hash = url;
+      },
+    },
+    window: { addEventListener() {} },
+    confirm: () => true,
+    localStorage: {
+      getItem: (key) => storage.get(key),
+      setItem: (key, value) => storage.set(key, value),
+    },
+    setInterval() {
+      throw Error("file pages must not poll authenticated API");
+    },
+  });
+  vm.runInContext(script, context);
   return context;
 }
+function fixture() {
+  const now = new Date().toISOString();
+  const make = (id, name, serving) => ({
+    id,
+    info: { name, public_ip: id === "node-a" ? "192.0.2.10" : "192.0.2.20" },
+    info_etag: id + "-etag",
+    report_fresh: true,
+    agent_fresh: true,
+    report: { reported_at: now, serving, bound_epoch: serving ? 1 : 0 },
+    agent: {
+      reported_at: now,
+      software: { version: "0.2.1" },
+      host: { hostname: name },
+    },
+    pending: null,
+    result: null,
+  });
+  const a = make("node-a", "主实例", true),
+    b = make("node-b", "备用实例", false);
+  a.agent.backup_observation = {
+    data_time: now,
+    verified_at: now,
+    snapshot_id: "a".repeat(64),
+    verification: "database-tree",
+    database_startup_verified: false,
+    telegram_included: true,
+    media_included: false,
+    consistency: "independent-online-snapshots",
+  };
+  return {
+    at: now,
+    control: {
+      schema: 1,
+      cluster_id: "test-cluster",
+      revision: 4,
+      epoch: 1,
+      owner: a.id,
+      phase: "ONLINE",
+    },
+    instances: [a, b],
+    capabilities: { planned_handover: true, dns: false },
+  };
+}
+function setSnapshot(c, state = fixture()) {
+  c.testState = clone(state);
+  evaluate(
+    c,
+    'snapshot=testState;statusFetchedAt=Date.now();statusError="";render()',
+  );
+}
+function review(c) {
+  evaluate(
+    c,
+    'switchTarget="node-b";startReview();$("route").checked=true;$("switch-confirm").value="确认";updateSwitchSubmit()',
+  );
+}
 
-test('browser API uses the Access session on the same origin without a bearer token',async()=>{
+test("browser API uses the same-origin Access session without a bearer token", async () => {
   let captured;
-  const c=browser(async(path,options)=>{captured={path,options};return Response.json({ok:true});});
-  await vm.runInContext("api('/api/status')",c);
-  assert.equal(captured.path,'/api/status');
-  assert.equal(captured.options.credentials,'same-origin');
-  assert.equal(captured.options.redirect,'manual');
-  assert.equal(captured.options.headers.Authorization,undefined);
+  const c = browser(async (path, options) => {
+    captured = { path, options };
+    return Response.json({ ok: true });
+  });
+  await evaluate(c, "api('/api/status')");
+  assert.equal(captured.options.credentials, "same-origin");
+  assert.equal(captured.options.redirect, "manual");
+  assert.equal(captured.options.cache, "no-store");
+  assert.equal(captured.options.headers.Authorization, undefined);
 });
 
-test('expired Access login stops polling and never replays a write',async()=>{
-  for(const response of [{type:'opaqueredirect',status:0},new Response('',{status:401}),new Response('',{status:403})]){
-    let calls=0;
-    const c=browser(async()=>{calls++;return response;});
-    await assert.rejects(vm.runInContext("api('/api/command','POST',{id:'original-command'})",c),/重新登录/);
-    await vm.runInContext('refresh()',c);
-    assert.equal(calls,1);
+test("expired Access login stops polling and never automatically replays a write", async () => {
+  for (const response of [
+    { type: "opaqueredirect", status: 0 },
+    new Response("", { status: 401 }),
+    new Response("", { status: 403 }),
+  ]) {
+    let calls = 0;
+    const c = browser(async () => {
+      calls++;
+      return response;
+    });
+    await assert.rejects(
+      evaluate(c, "api('/api/command','POST',{id:'original-command'})"),
+      /重新登录/,
+    );
+    await evaluate(c, "refresh()");
+    assert.equal(calls, 1);
+    assert.equal(c.document.getElementById("login-link").hidden, false);
   }
 });
 
-test('human machine labels include IP and stable ID, with hostname fallback',()=>{
- const c=browser(async()=>Response.json({}));
- const label=vm.runInContext("instanceLabel({id:'node-1',info:{name:'primary-vps',public_ip:'192.0.2.10'}})",c);
- assert.equal(label,'primary-vps · 192.0.2.10 [node-1]');
- assert.equal(vm.runInContext("instanceName({id:'node-2',agent:{host:{hostname:'backup-vps'}}})",c),'backup-vps');
- assert.equal(vm.runInContext("instanceName({id:'node-3'})",c),'node-3');
+test("overview separates backup file verification from a restore and startup test", () => {
+  const c = browser();
+  setSnapshot(c);
+  assert.equal(
+    c.document.getElementById("health-title").textContent,
+    "当前服务正常",
+  );
+  assert.equal(
+    c.document.getElementById("backup-verification").textContent,
+    "数据库文件校验已通过",
+  );
+  evaluate(c, "openBackup()");
+  assert.match(
+    c.document.getElementById("backup-detail").textContent,
+    /未包含数据库启动校验/,
+  );
+  assert.match(
+    c.document.getElementById("backup-detail").textContent,
+    /未打包，继续使用原 S3/,
+  );
+  assert.equal(c.document.getElementById("page-tools").hidden, true);
 });
 
-test('background refresh preserves typed identity and its original concurrency token',()=>{
- const c=browser(async()=>Response.json({}));
- vm.runInContext("snapshot={instances:[{id:'node-1',info:{name:'old',public_ip:'192.0.2.11'},info_etag:'old-etag'},{id:'node-2',info:{name:'backup'},info_etag:'other-etag'}]};document.getElementById('target').value='node-1';fillInstanceInfo();document.getElementById('instance-name').value='my edit';document.getElementById('instance-name').oninput();snapshot.instances[0].info.name='other browser edit';snapshot.instances[0].info_etag='new-etag';fillInstanceInfo();",c);
- assert.equal(vm.runInContext("document.getElementById('instance-name').value",c),'my edit');
- assert.equal(vm.runInContext('infoETag',c),'old-etag');
- vm.runInContext("document.getElementById('target').value='node-2';document.getElementById('target').onchange();",c);
- assert.equal(vm.runInContext("document.getElementById('instance-name').value",c),'backup');
- assert.equal(vm.runInContext('infoETag',c),'other-etag');
+test("stale report, wrong ownership and failed refresh cannot display a healthy service or enable a switch", async () => {
+  const c = browser(async () => {
+    throw new Error("network unavailable");
+  });
+  const state = fixture();
+  state.instances[0].report.reported_at = "2020-01-01T00:00:00Z";
+  setSnapshot(c, state);
+  assert.notEqual(
+    c.document.getElementById("health-title").textContent,
+    "当前服务正常",
+  );
+  assert.match(evaluate(c, 'switchBlocker(findInstance("node-b"))'), /源实例/);
+  setSnapshot(c);
+  evaluate(c, "snapshot.instances[1].report.serving=true;render()");
+  assert.match(
+    c.document.getElementById("health-title").textContent,
+    /归属不一致/,
+  );
+  setSnapshot(c);
+  review(c);
+  await evaluate(c, "refresh()");
+  assert.match(
+    c.document.getElementById("health-title").textContent,
+    /无法确认/,
+  );
+  assert.equal(c.document.getElementById("switch-submit").disabled, true);
+  assert.equal(evaluate(c, "snapshot.instances.length"), 2); // Preserve last observation, clearly marked stale.
+});
+
+test("switch wizard requires a target, route acknowledgement, typed confirmation and unchanged state", async () => {
+  let writes = 0;
+  const c = browser(async () => {
+    writes++;
+    return Response.json({});
+  });
+  setSnapshot(c);
+  assert.equal(c.document.getElementById("switch-next").disabled, true);
+  evaluate(c, 'switchTarget="node-b";startReview()');
+  assert.equal(c.document.getElementById("switch-submit").disabled, true);
+  evaluate(c, '$("switch-confirm").value="确认";updateSwitchSubmit()');
+  assert.equal(c.document.getElementById("switch-submit").disabled, true);
+  evaluate(c, '$("route").checked=true;updateSwitchSubmit()');
+  assert.equal(c.document.getElementById("switch-submit").disabled, false);
+  evaluate(c, "snapshot.control.revision++;renderSwitch()");
+  assert.equal(c.document.getElementById("switch-submit").disabled, true);
+  await evaluate(c, "submitSwitch()");
+  assert.equal(writes, 0);
+});
+
+test("switch command carries exact state and uncertain delivery retries the identical command", async () => {
+  const state = fixture(),
+    writes = [];
+  const c = browser(async (path, options) => {
+    if (path === "/api/status") return Response.json(state);
+    writes.push(JSON.parse(options.body));
+    throw new Error("response lost");
+  });
+  setSnapshot(c, state);
+  review(c);
+  await evaluate(c, "submitSwitch()");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].target, "node-b");
+  assert.equal(writes[0].source_epoch, 1);
+  assert.equal(writes[0].bound_epoch, 0);
+  assert.deepEqual(writes[0].expected, {
+    revision: 4,
+    epoch: 1,
+    owner: "node-a",
+    phase: "ONLINE",
+  });
+  assert.match(writes[0].operation_id, /^move-/);
+  assert.equal(evaluate(c, "reviewContext"), null);
+  assert.equal(c.document.getElementById("receipt").hidden, false);
+  await evaluate(c, "retryCommand()");
+  assert.equal(writes.length, 2);
+  assert.deepEqual(writes[0], writes[1]);
+});
+
+test("APPLIED does not mean a completed handover; completion requires matching operation, owner, epoch and fresh serving report", () => {
+  const c = browser();
+  setSnapshot(c);
+  evaluate(
+    c,
+    'lastCommand=makeCommand(findInstance("node-b"),"handover-request",expectedState(),"move-test");snapshot.instances[1].pending=lastCommand;snapshot.instances[1].result={state:"APPLIED"};renderReceipt()',
+  );
+  assert.equal(
+    c.document.getElementById("receipt-badge").textContent,
+    "指令已处理",
+  );
+  evaluate(
+    c,
+    'snapshot.control={...snapshot.control,owner:"node-b",epoch:2,last_completed:{id:"move-test"}};snapshot.instances[1].report={...snapshot.instances[1].report,serving:true,bound_epoch:2};renderReceipt()',
+  );
+  assert.equal(
+    c.document.getElementById("receipt-badge").textContent,
+    "切换完成",
+  );
+  evaluate(c, "snapshot.instances[1].report_fresh=false;renderReceipt()");
+  assert.notEqual(
+    c.document.getElementById("receipt-badge").textContent,
+    "切换完成",
+  );
+});
+
+test("background refresh preserves edited machine identity and its original concurrency token", () => {
+  const c = browser();
+  setSnapshot(c);
+  evaluate(
+    c,
+    'openInstance("node-a",true);$("instance-name").value="my edit";$("instance-name").oninput();snapshot.instances[0].info.name="remote edit";snapshot.instances[0].info_etag="new-etag";render()',
+  );
+  assert.equal(c.document.getElementById("instance-name").value, "my edit");
+  assert.equal(evaluate(c, "infoETag"), "node-a-etag");
+  evaluate(c, 'openInstance("node-b",true)');
+  assert.equal(c.document.getElementById("instance-name").value, "备用实例");
+  assert.equal(evaluate(c, "infoETag"), "node-b-etag");
+});
+
+test("instance names are rendered as text, never executable HTML", () => {
+  const c = browser(),
+    state = fixture();
+  state.instances[0].info.name = "<img src=x onerror=alert(1)>";
+  setSnapshot(c, state);
+  assert.equal(c.document.querySelectorAll("#instances img").length, 0);
+  assert.match(
+    c.document.getElementById("instances").textContent,
+    /<img src=x/,
+  );
+});
+
+test("disabled DNS capability and claimed command cannot offer unsupported intervention", () => {
+  const c = browser(),
+    state = fixture();
+  state.instances[0].pending = {
+    id: "cmd-old",
+    expires_at: "2020-01-01T00:00:00Z",
+  };
+  state.instances[0].result = { state: "CLAIMED" };
+  setSnapshot(c, state);
+  assert.equal(c.document.getElementById("dns-open").disabled, true);
+  assert.equal(c.document.getElementById("abandon").disabled, true);
+  assert.match(
+    c.document.getElementById("abandon-description").textContent,
+    /已被认领/,
+  );
+});
+
+test("operation confirmation is bound to the reviewed machine and authority", async () => {
+  let writes = 0;
+  const c = browser(async () => {
+    writes++;
+    return Response.json({});
+  });
+  setSnapshot(c);
+  evaluate(
+    c,
+    'openAction("fence-local");$("action-confirm").value="确认";snapshot.control.revision++',
+  );
+  await evaluate(c, "submitAction()");
+  assert.equal(writes, 0);
+  assert.match(
+    c.document.getElementById("action-error").textContent,
+    /状态已变化/,
+  );
+});
+
+test("loading a saved command offers inspection, but never submits it automatically", () => {
+  let calls = 0;
+  const c = browser(
+    async () => {
+      calls++;
+      return Response.json({});
+    },
+    {
+      schema: 1,
+      id: "cmd-saved",
+      action: "probe",
+      target: "node-a",
+      expires_at: "2020-01-01T00:00:00Z",
+    },
+  );
+  setSnapshot(c);
+  assert.equal(calls, 0);
+  assert.equal(c.document.getElementById("receipt").hidden, false);
+  assert.equal(c.document.getElementById("retry").disabled, true);
+});
+
+test("a target IP change invalidates the route acknowledgement", () => {
+  const c = browser();
+  setSnapshot(c);
+  review(c);
+  evaluate(
+    c,
+    'snapshot.instances[1].info.public_ip="192.0.2.21";renderSwitch()',
+  );
+  assert.equal(c.document.getElementById("switch-submit").disabled, true);
+  assert.match(
+    c.document.getElementById("review-error").textContent,
+    /重新核对/,
+  );
+});
+
+test("single-instance cluster explains how to prepare a standby without offering a self-switch", () => {
+  const c = browser(),
+    state = fixture();
+  state.instances.pop();
+  setSnapshot(c, state);
+  evaluate(c, 'navigate("switch")');
+  assert.match(
+    c.document.getElementById("switch-targets").textContent,
+    /还没有备用实例/,
+  );
+  assert.equal(c.document.getElementById("switch-next").disabled, true);
+});
+
+test("losing Access during a write immediately marks the previous observation stale", async () => {
+  const c = browser(async () => new Response("", { status: 401 }));
+  setSnapshot(c);
+  await assert.rejects(
+    evaluate(c, 'api("/api/command","POST",{id:"original"})'),
+    /重新登录/,
+  );
+  assert.match(
+    c.document.getElementById("health-title").textContent,
+    /无法确认/,
+  );
+  assert.equal(c.document.getElementById("dns-open").disabled, true);
 });

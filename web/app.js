@@ -1,37 +1,1336 @@
-'use strict';
-const $=id=>document.getElementById(id);
-const text=(id,x)=>$(id).textContent=typeof x==='string'?x:JSON.stringify(x,null,2);
-let snapshot=null,refreshing=false,inFlight=false,dnsRecord=null,lastCommand=null,loginExpired=false,infoDirty=false,infoTarget=null,infoETag=null;
-const storageKey=()=> 'matrix-admin-v1:'+ location.origin;
-const hints={probe:'只验证 Worker → R2 → 实例轮询 → 回执的通路，不启停业务。',
-'handover-request':'先将入口指向目标，再提交。源实例完成停写、最终备份和恢复验证后才会释放归属；目标领取下一 epoch。',
-'handover-resume':'继续目标已有操作，沿用原 operation_id 和源 epoch；不覆盖可能已经写入的新代数据。',
-'handover-cancel':'在目标执行。源认领前可取消；源已认领时，先在源中止最终备份并恢复，再取消目标请求。',
-'fence-local':'关闭入口并停止所选实例。提交后通过 R2 观测执行过程，命令回执不等于服务已经全部停止。',
-'resume-local':'只恢复相同 owner 和数据 epoch 的实例，无法抢占归属或恢复已释放的旧副本。',
-'source-resume':'在源执行，仅限归属释放前。worker 未退出时会拒绝。恢复源后，还需清理目标请求并把入口切回源。'};
-$('operation').value='move-'+crypto.randomUUID();
-$('action').onchange=()=>{text('help',hints[$('action').value]);$('confirm').value='';};$('action').onchange();
-async function api(path,method='GET',payload){
- const res=await fetch(path,{method,headers:payload?{'Content-Type':'application/json'}:{},body:payload?JSON.stringify(payload):undefined,cache:'no-store',credentials:'same-origin',redirect:'manual',signal:AbortSignal.timeout(25000)});
- if(res.type==='opaqueredirect'||res.status===401||res.status===403){loginExpired=true;throw new Error('登录已失效或未获授权，请点击“重新登录”。');}
- let data;try{data=await res.json();}catch{throw new Error('服务没有返回 JSON，请重新登录或检查部署');}if(!res.ok)throw new Error(data.error||('HTTP '+res.status));return data;
-}
-function instanceName(i){return i?.info?.name||i?.agent?.host?.hostname||i?.report?.hostname||i?.id||'未知实例';}
-function instanceLabel(i){return `${instanceName(i)}${i?.info?.public_ip?' · '+i.info.public_ip:''} [${i?.id||''}]`;}
-function fillInstanceInfo(force=false){const i=selected();if(!force&&infoDirty&&infoTarget===i?.id)return;infoTarget=i?.id;infoETag=i?.info_etag??null;infoDirty=false;$('instance-name').value=i?.info?.name||'';$('instance-ip').value=i?.info?.public_ip||'';text('instance-info-target',i?instanceLabel(i):'请选择实例');}
-function selected(){return snapshot?.instances.find(x=>x.id===$('target').value);}
-async function refresh(){if(refreshing||loginExpired)return;refreshing=true;$('refresh').disabled=true;try{snapshot=await api('/api/status');const c=snapshot.control;text('cluster',`${c.phase} · epoch ${c.epoch}`);text('owner','当前服务实例：'+(c.owner?instanceLabel(snapshot.instances.find(i=>i.id===c.owner)||{id:c.owner}):'空（已释放）'));text('observed',`revision ${c.revision} · ${snapshot.at}`);text('progress',c.operation?`${c.operation.id} / ${c.operation.phase}`:'无进行中的交接');text('raw',snapshot);const before=$('target').value;$('target').replaceChildren();$('instances').replaceChildren();for(const i of snapshot.instances){const option=document.createElement('option');option.value=i.id;option.textContent=instanceLabel(i);$('target').append(option);const node=document.createElement('div');node.className='node';const heading=document.createElement('strong');heading.textContent=instanceLabel(i);node.append(heading);const host=document.createElement('p');host.textContent=`主机名：${i.agent?.host?.hostname||i.report?.hostname||'尚未上报'} · 网卡地址：${(i.agent?.host?.addresses||[]).join(', ')||'尚未上报'}`;node.append(host);const p=document.createElement('p');p.className=!i.report_fresh||!i.agent_fresh?'warning':'';p.textContent=`控制报告 ${i.report_fresh?'新鲜':'缺失/过期'} · 指令轮询 ${i.agent_fresh?'新鲜':'缺失/过期'} · serving=${i.report?.serving??'未知'} · bound_epoch=${i.report?.bound_epoch??'未知'}`;node.append(p);const pre=document.createElement('pre');pre.textContent=JSON.stringify({software:i.agent?.software,reason:i.report?.reason,error:i.report?.error,mailbox_error:i.agent?.error,backup:i.agent?.backup_observation,final_backup:i.report?.final_backup,handover:i.report?.handover,pending:i.pending,result:i.result,worker_errors:i.agent?.worker_errors},null,2);node.append(pre);$('instances').append(node);}if(snapshot.instances.some(x=>x.id===before))$('target').value=before;fillInstanceInfo();text('notice','已读取 R2 状态。过期观测不代表实例已停止，也不能作为接管授权。');}catch(e){snapshot=null;text('notice',e.message);}finally{refreshing=false;$('refresh').disabled=false;}}
-$('refresh').onclick=()=>{loginExpired=false;return refresh();};
-$('target').onchange=()=>fillInstanceInfo(true);
-$('instance-name').oninput=$('instance-ip').oninput=()=>{infoDirty=true;};
-$('instance-info-save').onclick=async()=>{const i=selected();if(!i)return;text('instance-info-result','正在保存…');try{await api('/api/instance-info','POST',{id:i.id,name:$('instance-name').value,public_ip:$('instance-ip').value,expected_etag:infoETag});infoDirty=false;text('instance-info-result','已保存');await refresh();}catch(e){text('instance-info-result',e.message);}};
+"use strict";
 
-async function send(command){if(inFlight)return;inFlight=true;$('execute').disabled=true;$('retry').disabled=true;try{lastCommand=command;try{localStorage.setItem(storageKey(),JSON.stringify(command));}catch{}text('result',{state:'SUBMITTING',command});text('result',await api('/api/command','POST',command));}catch(e){text('result',{error:e.message,id:command.id,operation_id:command.operation_id,note:'结果可能未知。先刷新 R2 状态，网络重发只能使用本次原指令。过期或被拒绝后，确认原因再新建指令。'});}finally{inFlight=false;$('execute').disabled=false;$('retry').disabled=false;$('confirm').value='';await refresh();}}
-$('execute').onclick=async()=>{try{if(!snapshot)throw new Error('先成功刷新状态');if($('confirm').value!=='确认')throw new Error('请输入“确认”');const instance=selected();if(!instance)throw new Error('请选择实例');const action=$('action').value;if(action==='handover-request'&&!$('route').checked)throw new Error('先切 Cloudflare 入口，再勾选确认');const c=snapshot.control;let op='',source=0;if(action==='handover-request'){op=$('operation').value.trim();source=c.epoch;}else if(['handover-resume','handover-cancel','source-resume'].includes(action)){const current=action==='source-resume'?instance.report?.final_backup:instance.report?.handover;if(!current)throw new Error('此实例没有对应操作');op=current.id;source=current.source_epoch;}if(!confirm(`在 ${instanceLabel(instance)} 提交「${$('action').selectedOptions[0].textContent}」？`))return;const command={schema:1,id:'cmd-'+crypto.randomUUID(),cluster_id:c.cluster_id,target:instance.id,action,created_at:new Date().toISOString(),expires_at:new Date(Date.now()+300000).toISOString(),expected:{revision:c.revision,epoch:c.epoch,owner:c.owner,phase:c.phase},bound_epoch:instance.report.bound_epoch,operation_id:op,source_epoch:source};await send(command);}catch(e){text('result',e.message);}};
-$('retry').onclick=async()=>{try{let command=lastCommand;try{command=JSON.parse(localStorage.getItem(storageKey())||'null')||command;}catch{}command=command||selected()?.pending;if(!command)throw new Error('没有已保存的原指令');if(confirm(`仅重发原指令 ${command.id}，不生成新编号。继续？`))await send(command);}catch(e){text('result',e.message);}};
-$('abandon').onclick=async()=>{try{const target=$('target').value,id=$('abandon-id').value.trim();if(!confirm(`关闭 ${instanceLabel(selected())} 的过期未认领指令 ${id}？不会改变业务归属。`))return;text('result',await api('/api/abandon-expired','POST',{target,id}));await refresh();}catch(e){text('result',e.message);}};
-$('diagnostic').onclick=async()=>{try{const report=await api('/api/diagnostic');const blob=new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='matrix-diagnostic-'+new Date().toISOString().replaceAll(':','-')+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){text('notice',e.message);}};
-$('dns-read').onclick=async()=>{try{dnsRecord=(await api('/api/dns')).record;text('dns-state',dnsRecord);}catch(e){dnsRecord=null;text('dns-state',e.message);}};
-$('dns-write').onclick=async()=>{try{if(!dnsRecord)throw new Error('先读取 DNS 记录');const ip=$('ip').value.trim();if(!confirm(`将 ${dnsRecord.name} 从 ${dnsRecord.content} 改成 ${ip}？`))return;const r=await api('/api/dns','POST',{id:'dns-'+crypto.randomUUID(),ip,expected_ip:dnsRecord.content});dnsRecord=r.record;text('dns-state',r);}catch(e){text('dns-state',e.message+'；先重新读取记录再操作。');}};
-if(location.protocol==='https:'){refresh();setInterval(refresh,15000);}else{text('notice','请在浏览器中打开已部署的 Worker HTTPS 地址，通过 Cloudflare Access 登录。');}
+const $ = (id) => document.getElementById(id);
+const text = (id, value) => {
+  $(id).textContent =
+    typeof value === "string" ? value : JSON.stringify(value, null, 2);
+};
+const actions = {
+  probe: ["检查指令通路", "只检查管理指令能否到达实例，不启停业务。"],
+  "handover-request": [
+    "切换实例",
+    "旧实例停写并完成最终备份后，新实例恢复、校验并接管服务。",
+  ],
+  "handover-resume": [
+    "继续目标实例切换",
+    "继续所选目标的原有切换任务，保留原操作编号，不覆盖可能已经写入的新数据。",
+  ],
+  "handover-cancel": [
+    "取消目标实例请求",
+    "仅在源实例尚未认领请求时直接取消。如果源实例已开始交接，需要先中止最终备份并恢复源实例，再取消此请求。",
+  ],
+  "fence-local": [
+    "停用实例",
+    "关闭所选实例的入口并停止服务。归属不会自动转移到其他机器。",
+  ],
+  "resume-local": [
+    "恢复当前归属实例",
+    "只恢复仍拥有当前服务归属、数据代数一致的实例。不能借此接管其他实例。",
+  ],
+  "source-resume": [
+    "中止交接并恢复源实例",
+    "仅限归属释放之前；若备份任务还在执行会拒绝操作。恢复后还需取消目标请求，并将 Cloudflare 入口切回源实例。",
+  ],
+};
+const phaseNames = {
+  ONLINE: "在线",
+  REQUESTED: "等待源实例响应",
+  QUIESCING: "正在停写",
+  QUIESCED: "已停止写入",
+  SNAPSHOTTING: "正在生成最终备份",
+  RELEASED: "已释放归属",
+  RESTORING: "正在恢复数据",
+  VALIDATING: "正在校验数据",
+  STARTING: "正在启动服务",
+};
+const receiptNames = {
+  CLAIMED: "实例已接收",
+  APPLIED: "指令已处理",
+  FAILED: "执行失败",
+  UNKNOWN: "结果待确认",
+  REJECTED: "指令被拒绝",
+};
+const terminalReceipts = new Set(["APPLIED", "FAILED", "UNKNOWN", "REJECTED"]);
+let snapshot = null,
+  statusFetchedAt = 0,
+  statusError = "",
+  refreshing = false,
+  loginExpired = false;
+let inFlight = false,
+  dnsBusy = false,
+  infoBusy = false,
+  dnsRecord = null;
+let lastCommand = null,
+  lastResponse = null,
+  commandError = "",
+  receiptDismissed = false;
+let switchTarget = "",
+  reviewContext = null,
+  actionContext = null;
+let infoTarget = null,
+  infoETag = null,
+  infoDirty = false;
+const storageKey = () => "matrix-admin-v1:" + location.origin;
+
+// All values coming from R2 are text nodes, never HTML.
+function element(tag, className, value) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (value !== undefined) node.textContent = value;
+  return node;
+}
+function badge(value, tone) {
+  return element("span", "badge " + tone, value);
+}
+function button(label, handler, className = "text-button") {
+  const node = element("button", className, label);
+  node.type = "button";
+  node.onclick = handler;
+  return node;
+}
+function setBadge(id, value, tone) {
+  $(id).className = "badge " + tone;
+  text(id, value);
+}
+function notice(message = "", error = false) {
+  text("notice", message);
+  $("notice").hidden = !message;
+  $("notice").className = "notice" + (error ? " error" : "");
+  $("login-link").hidden = !loginExpired;
+}
+function replaceContent(node, children) {
+  const focused = node.contains(document.activeElement)
+    ? document.activeElement?.dataset.focusKey
+    : null;
+  node.replaceChildren(...children);
+  if (focused)
+    [...node.querySelectorAll("[data-focus-key]")]
+      .find((x) => x.dataset.focusKey === focused)
+      ?.focus({ preventScroll: true });
+}
+function time(value) {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime())
+    ? date.toLocaleString("zh-CN", { hour12: false })
+    : "尚未上报";
+}
+function ago(value) {
+  const age = Date.now() - Date.parse(value);
+  if (!Number.isFinite(age)) return "时间未知";
+  if (age < -30000) return "时间异常";
+  if (age < 60000) return "刚刚";
+  if (age < 3600000) return `${Math.floor(age / 60000)} 分钟前`;
+  if (age < 86400000) return `${Math.floor(age / 3600000)} 小时前`;
+  return `${Math.floor(age / 86400000)} 天前`;
+}
+function instanceName(i) {
+  return (
+    i?.info?.name ||
+    i?.agent?.host?.hostname ||
+    i?.report?.hostname ||
+    i?.id ||
+    "未知实例"
+  );
+}
+function instanceLabel(i) {
+  return `${instanceName(i)}${i?.info?.public_ip ? " · " + i.info.public_ip : ""} [${i?.id || ""}]`;
+}
+function findInstance(id) {
+  return snapshot?.instances.find((i) => i.id === id);
+}
+function selected() {
+  return findInstance($("target").value);
+}
+function currentStatus() {
+  return (
+    !!snapshot &&
+    !statusError &&
+    !loginExpired &&
+    Date.now() - statusFetchedAt < 45000
+  );
+}
+function fresh(i, part = "report") {
+  const age = Date.now() - Date.parse(i?.[part]?.reported_at);
+  return (
+    currentStatus() &&
+    i?.[part + "_fresh"] === true &&
+    Number.isFinite(age) &&
+    age >= -30000 &&
+    age <= 90000
+  );
+}
+function expectedState() {
+  const c = snapshot.control;
+  return {
+    revision: c.revision,
+    epoch: c.epoch,
+    owner: c.owner,
+    phase: c.phase,
+  };
+}
+function sameState(expected) {
+  return (
+    currentStatus() &&
+    JSON.stringify(expected) === JSON.stringify(expectedState())
+  );
+}
+function instanceError(i) {
+  return (
+    i?.report?.error ||
+    i?.agent?.error ||
+    Object.values(i?.agent?.worker_errors || {})
+      .map((x) => (typeof x === "string" ? x : x?.error || JSON.stringify(x)))
+      .join("；")
+  );
+}
+function role(i) {
+  if (!fresh(i)) return ["状态待确认", "warn"];
+  if (i.report.serving) {
+    if (
+      i.id !== snapshot.control.owner ||
+      i.report.bound_epoch !== snapshot.control.epoch
+    )
+      return ["归属异常", "bad"];
+    return ["正在服务", "good"];
+  }
+  if (instanceError(i)) return ["需要处理", "bad"];
+  if (i.id === snapshot.control.owner)
+    return [
+      snapshot.control.phase === "ONLINE" ? "服务已停止" : "正在交接",
+      "warn",
+    ];
+  return fresh(i, "agent") ? ["待命", "neutral"] : ["轮询待确认", "warn"];
+}
+function health() {
+  if (!snapshot)
+    return [
+      "尚未连接",
+      "等待集群状态",
+      "成功读取状态后，这里会显示当前服务实例。",
+      "neutral",
+    ];
+  if (!currentStatus())
+    return [
+      "状态待确认",
+      "暂时无法确认服务状态",
+      "下方保留最近一次观测。刷新失败不代表实例已经停止。",
+      "warn",
+    ];
+  const c = snapshot.control,
+    owner = findInstance(c.owner);
+  const unexpected = snapshot.instances.some(
+    (i) =>
+      fresh(i) &&
+      i.report.serving &&
+      (i.id !== c.owner || i.report.bound_epoch !== c.epoch),
+  );
+  if (unexpected)
+    return [
+      "需要处理",
+      "实例报告与服务归属不一致",
+      "请查看实例详情和诊断信息，暂勿发起新的切换。",
+      "bad",
+    ];
+  if (c.phase !== "ONLINE")
+    return [
+      "切换进行中",
+      phaseNames[c.phase] || "正在交接",
+      "系统正在完成备份与接管，可在切换页面查看进度。",
+      "info",
+    ];
+  if (!owner || !fresh(owner))
+    return [
+      "状态待确认",
+      "当前实例报告已过期",
+      "无法确认当前服务是否仍在运行，请检查实例报告。",
+      "warn",
+    ];
+  if (owner.report.serving !== true)
+    return [
+      "服务未就绪",
+      "当前实例尚未提供服务",
+      "查看实例详情，确认停止原因后再执行恢复操作。",
+      "warn",
+    ];
+  if (instanceError(owner) || !fresh(owner, "agent"))
+    return [
+      "需要检查",
+      "服务运行中，有报告异常",
+      "服务实例仍报告在线，请检查指令轮询或后台任务。",
+      "warn",
+    ];
+  return [
+    "服务运行中",
+    "当前服务正常",
+    "当前归属与实例报告一致，服务入口已打开。",
+    "good",
+  ];
+}
+function backupSource() {
+  const owner = findInstance(snapshot?.control.owner);
+  if (owner?.agent?.backup_observation) return owner;
+  return [...(snapshot?.instances || [])]
+    .filter((i) => i.agent?.backup_observation)
+    .sort(
+      (a, b) =>
+        (Date.parse(b.agent.backup_observation.data_time) || 0) -
+        (Date.parse(a.agent.backup_observation.data_time) || 0),
+    )[0];
+}
+function backupVerification(b) {
+  if (
+    b?.verification === "full-restore" &&
+    b.database_startup_verified === true
+  )
+    return "恢复及启动校验已通过";
+  if (b?.verification === "database-tree") return "数据库文件校验已通过";
+  if (b?.verification === "full-restore")
+    return "恢复校验已通过，启动校验未确认";
+  return "校验结果待确认";
+}
+function renderOverview() {
+  const [label, title, description, tone] = health();
+  setBadge("health-badge", label, tone);
+  text("health-title", title);
+  text("health-description", description);
+  const owner = findInstance(snapshot?.control.owner);
+  text(
+    "owner-name",
+    owner
+      ? instanceName(owner)
+      : snapshot?.control.owner || (snapshot ? "归属已释放，等待接管" : "—"),
+  );
+  text("owner-ip", owner?.info?.public_ip || (owner ? "未登记公网 IP" : ""));
+  const source = backupSource(),
+    backup = source?.agent?.backup_observation;
+  text("backup-age", backup ? ago(backup.data_time) : "暂无备份记录");
+  text(
+    "backup-time",
+    backup ? "数据截至 " + time(backup.data_time) : "等待实例上报已完成的备份",
+  );
+  text("backup-verification", backupVerification(backup));
+  text(
+    "backup-description",
+    backup
+      ? `${source.id === snapshot.control.owner ? "" : "来自 " + instanceName(source) + " · "}${fresh(source, "agent") ? "" : "报告已过期 · "}${backup.telegram_included ? "含 Matrix 与 Telegram 数据库" : "Telegram 数据库是否包含：未确认"}`
+      : "完成首次备份后显示数据时间和校验结果。",
+  );
+  $("backup-details").disabled = !backup;
+  const warnings =
+    snapshot?.instances.filter(
+      (i) => !fresh(i) || !fresh(i, "agent") || instanceError(i),
+    ) || [];
+  const changing = snapshot && snapshot.control.phase !== "ONLINE";
+  $("attention").hidden = !changing && !warnings.length;
+  if (!$("attention").hidden) {
+    $("attention").replaceChildren(
+      element(
+        "span",
+        "",
+        changing
+          ? "交接正在进行，当前阶段：" +
+              (phaseNames[snapshot.control.phase] || snapshot.control.phase)
+          : `${warnings.length} 台实例需要检查。过期报告不能用来判断实例已停机。`,
+      ),
+      button(changing ? "查看切换 →" : "查看详情 →", () =>
+        changing ? navigate("switch") : openInstance(warnings[0].id),
+      ),
+    );
+  }
+  text("instance-count", String(snapshot?.instances.length ?? 0));
+  const rows = (snapshot?.instances || []).map((i) => {
+    const row = element("div", "instance-row"),
+      machine = element("div", "machine");
+    machine.append(
+      element(
+        "span",
+        "machine-symbol" + (i.id === snapshot.control.owner ? " active" : ""),
+        "▤",
+      ),
+    );
+    const copy = element("div"),
+      name = button(instanceName(i), () => openInstance(i.id), "machine-name");
+    name.dataset.focusKey = i.id;
+    copy.append(
+      name,
+      element(
+        "span",
+        "machine-meta mono",
+        i.info?.public_ip || "未登记公网 IP",
+      ),
+    );
+    machine.append(copy);
+    const [state, color] = role(i),
+      status = element("div", "instance-status");
+    status.append(badge(state, color));
+    const seen = element("div", "machine-seen", ago(i.report?.reported_at));
+    seen.title = time(i.report?.reported_at);
+    seen.append(
+      element(
+        "small",
+        "",
+        i.agent?.software?.version
+          ? "v" + String(i.agent.software.version).replace(/^v/, "")
+          : "版本未上报",
+      ),
+    );
+    const detail = button("详情", () => openInstance(i.id));
+    detail.dataset.focusKey = i.id + "-detail";
+    row.append(machine, status, seen, detail);
+    return row;
+  });
+  replaceContent(
+    $("instances"),
+    rows.length
+      ? rows
+      : [
+          element(
+            "div",
+            "empty-state",
+            snapshot
+              ? "尚无实例上报。先在服务器准备实例并启动轮询。"
+              : "未能读取实例列表",
+          ),
+        ],
+  );
+  renderActivity();
+}
+function renderActivity() {
+  const rows = (snapshot?.instances || [])
+    .filter((i) => i.pending)
+    .sort(
+      (a, b) =>
+        Date.parse(b.pending.created_at) - Date.parse(a.pending.created_at),
+    )
+    .map((i) => {
+      const p = i.pending,
+        r = i.result,
+        row = element("div", "activity-row");
+      const state =
+        r?.state ||
+        (Date.parse(p.expires_at) <= Date.now() ? "EXPIRED" : "PENDING");
+      const label =
+        receiptNames[state] ||
+        (state === "EXPIRED" ? "已过期，待核对" : "等待实例接收");
+      row.append(
+        badge(
+          label,
+          state === "APPLIED"
+            ? "neutral"
+            : ["FAILED", "UNKNOWN", "REJECTED", "EXPIRED"].includes(state)
+              ? "warn"
+              : "info",
+        ),
+      );
+      const copy = element(
+        "div",
+        "activity-copy",
+        (actions[p.action]?.[0] || p.action) + " · " + instanceName(i),
+      );
+      copy.append(
+        element(
+          "small",
+          "",
+          r?.error ||
+            (p.action?.startsWith("handover") && state === "APPLIED"
+              ? "指令已处理；交接是否完成以服务状态为准"
+              : time(r?.at || p.created_at)),
+        ),
+      );
+      const view = button("查看", () => {
+        lastCommand = p;
+        lastResponse = null;
+        commandError = "";
+        receiptDismissed = false;
+        renderReceipt();
+        $("receipt").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+      view.dataset.focusKey = p.id;
+      row.append(copy, element("time", "", ago(r?.at || p.created_at)), view);
+      return row;
+    });
+  replaceContent(
+    $("activity"),
+    rows.length
+      ? rows
+      : [
+          element(
+            "p",
+            "empty-inline",
+            "暂无管理操作。服务运行不需要保持此页面打开。",
+          ),
+        ],
+  );
+}
+
+async function api(path, method = "GET", payload) {
+  if (loginExpired) throw new Error("登录已失效，请重新登录。");
+  const res = await fetch(path, {
+    method,
+    headers: payload ? { "Content-Type": "application/json" } : {},
+    body: payload ? JSON.stringify(payload) : undefined,
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "manual",
+    signal: AbortSignal.timeout(25000),
+  });
+  if (
+    res.type === "opaqueredirect" ||
+    res.status === 401 ||
+    res.status === 403
+  ) {
+    loginExpired = true;
+    notice(
+      "登录已失效或未获授权，请重新登录。已停止刷新，不会自动重发指令。",
+      true,
+    );
+    if (snapshot) render();
+    throw new Error("登录已失效或未获授权，请重新登录。");
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error("服务未返回有效数据，请检查登录状态或 Worker 部署。");
+  }
+  if (!res.ok) throw new Error(data.error || "请求失败：HTTP " + res.status);
+  return data;
+}
+async function refresh() {
+  if (refreshing || loginExpired) return;
+  refreshing = true;
+  $("refresh").disabled = true;
+  try {
+    const next = await api("/api/status");
+    if (!next.control || !Array.isArray(next.instances))
+      throw new Error("状态响应不完整，请导出诊断并检查服务。");
+    snapshot = next;
+    statusFetchedAt = Date.now();
+    statusError = "";
+    notice();
+    text(
+      "updated",
+      "更新于 " +
+        new Date(statusFetchedAt).toLocaleTimeString("zh-CN", {
+          hour12: false,
+        }),
+    );
+  } catch (e) {
+    statusError = e.message;
+    notice(
+      e.message + (snapshot ? " 正在显示上次观测，操作已暂停。" : ""),
+      true,
+    );
+    text("updated", snapshot ? "刷新失败 · 保留上次观测" : "状态读取失败");
+  } finally {
+    refreshing = false;
+    $("refresh").disabled = false;
+    render();
+  }
+}
+function render() {
+  renderOverview();
+  const before = $("target").value;
+  $("target").replaceChildren(
+    ...(snapshot?.instances || []).map((i) => {
+      const option = element(
+        "option",
+        "",
+        instanceName(i) + (i.info?.public_ip ? " · " + i.info.public_ip : ""),
+      );
+      option.value = i.id;
+      return option;
+    }),
+  );
+  $("target").value = findInstance(before)
+    ? before
+    : snapshot?.control.owner || snapshot?.instances[0]?.id || "";
+  if (!selected() && snapshot?.instances.length)
+    $("target").value = snapshot.instances[0].id;
+  renderTools();
+  renderSwitch();
+  renderReceipt();
+  text("raw", snapshot || {});
+  if ($("instance-dialog").open && findInstance(infoTarget))
+    renderInstanceDetail();
+}
+function navigate(page) {
+  if (!["overview", "switch", "tools"].includes(page)) page = "overview";
+  for (const node of document.querySelectorAll("[data-page]")) {
+    if (node.dataset.page === page) node.setAttribute("aria-current", "page");
+    else node.removeAttribute("aria-current");
+  }
+  for (const id of ["overview", "switch", "tools"])
+    $("page-" + id).hidden = id !== page;
+  text(
+    "page-label",
+    { overview: "总览", switch: "切换实例", tools: "运维工具" }[page],
+  );
+  if (location.hash !== "#" + page) history.replaceState(null, "", "#" + page);
+  $(page + "-title").focus({ preventScroll: true });
+  if (page === "switch") renderSwitch();
+}
+
+function commandBlocker(i) {
+  if (!currentStatus()) return "请先刷新，确认状态仍然有效。";
+  if (!i) return "请选择实例。";
+  if (!fresh(i) || !fresh(i, "agent"))
+    return "实例或指令轮询报告已过期，暂不能提交。";
+  if (!Number.isSafeInteger(i.report?.bound_epoch))
+    return "实例数据代数尚未上报。";
+  if (i.pending && !terminalReceipts.has(i.result?.state))
+    return "此实例有未结束的指令，请先核对回执。";
+  if (inFlight) return "正在提交指令，请稍候。";
+  return "";
+}
+function switchBlocker(i) {
+  const blocked = commandBlocker(i);
+  if (blocked) return blocked;
+  if (snapshot.capabilities?.planned_handover !== true)
+    return "此集群尚未启用正常交接。";
+  if (snapshot.control.phase !== "ONLINE") return "已有交接正在进行。";
+  if (i.id === snapshot.control.owner) return "这已经是当前服务实例。";
+  if (
+    snapshot.instances.some(
+      (node) =>
+        fresh(node) &&
+        node.report.serving &&
+        (node.id !== snapshot.control.owner ||
+          node.report.bound_epoch !== snapshot.control.epoch),
+    )
+  )
+    return "实例服务报告与归属不一致，请先处理异常。";
+  const owner = findInstance(snapshot.control.owner);
+  if (
+    !fresh(owner) ||
+    !fresh(owner, "agent") ||
+    owner.report.serving !== true ||
+    owner.report.bound_epoch !== snapshot.control.epoch
+  )
+    return "请先确认源实例正常在线，才能发起正常交接。";
+  if (i.report.serving !== false)
+    return "目标实例仍报告正在服务，请先检查归属。";
+  return "";
+}
+function renderSwitch() {
+  const c = snapshot?.control,
+    active = c && c.phase !== "ONLINE";
+  $("switch-active").hidden = !active;
+  $("switch-wizard").hidden = !!active;
+  if (active) {
+    const op = c.operation;
+    text("progress-title", phaseNames[c.phase] || c.phase);
+    text(
+      "progress-description",
+      op
+        ? `${instanceName(findInstance(op.source) || { id: op.source })} → ${instanceName(findInstance(op.target) || { id: op.target })}`
+        : "正在等待交接信息",
+    );
+    const steps = [
+      "停写与最终备份",
+      "释放旧实例归属",
+      "恢复与校验数据",
+      "启动新实例",
+      "确认上线",
+    ];
+    const index =
+      {
+        REQUESTED: 0,
+        QUIESCING: 0,
+        QUIESCED: 0,
+        SNAPSHOTTING: 0,
+        RELEASED: 1,
+        RESTORING: 2,
+        VALIDATING: 2,
+        STARTING: 3,
+      }[c.phase] ?? 0;
+    $("progress-steps").replaceChildren(
+      ...steps.map((s, n) => {
+        const item = element("li", n < index ? "complete" : "", s);
+        item.dataset.number = String(n + 1);
+        if (n === index) item.setAttribute("aria-current", "step");
+        return item;
+      }),
+    );
+    text(
+      "progress-note",
+      currentStatus()
+        ? "只有归属切换完成且新实例报告正在服务，才会显示上线。"
+        : "当前是上次观测，尚未获得最新进度。",
+    );
+  }
+  text(
+    "switch-source",
+    "当前服务实例：" +
+      instanceName(findInstance(c?.owner) || { id: c?.owner || "尚未确认" }),
+  );
+  const targets = (snapshot?.instances || []).filter((i) => i.id !== c?.owner);
+  if (!targets.some((i) => i.id === switchTarget)) switchTarget = "";
+  const rows = targets.map((i) => {
+    const blocked = switchBlocker(i),
+      label = element("label", "target-option");
+    const radio = element("input");
+    radio.type = "radio";
+    radio.name = "switch-target";
+    radio.value = i.id;
+    radio.checked = switchTarget === i.id;
+    radio.disabled = !!blocked;
+    radio.dataset.focusKey = i.id;
+    radio.onchange = () => {
+      switchTarget = i.id;
+      resetReview();
+      renderSwitch();
+    };
+    const copy = element("span", "target-copy");
+    copy.append(
+      element("strong", "", instanceName(i)),
+      element("small", "", i.info?.public_ip || "未登记公网 IP"),
+      element("small", "", blocked || "实例与指令轮询报告有效"),
+    );
+    label.append(
+      radio,
+      copy,
+      badge(blocked ? "暂不可切换" : "可作为目标", blocked ? "warn" : "good"),
+    );
+    return label;
+  });
+  replaceContent(
+    $("switch-targets"),
+    rows.length
+      ? rows
+      : [
+          element(
+            "div",
+            "empty-state",
+            "还没有备用实例。在新 VPS 准备实例并启动轮询后，它会出现在这里。",
+          ),
+        ],
+  );
+  const blocked = switchBlocker(findInstance(switchTarget));
+  text(
+    "switch-blocker",
+    switchTarget
+      ? blocked
+      : targets.length
+        ? "请选择一台目标实例。"
+        : "准备备用实例不会自动恢复数据或接管服务。",
+  );
+  $("switch-next").disabled = !!blocked;
+  if (reviewContext && !reviewValid()) {
+    text("review-error", "集群状态已变化，请返回选择，重新核对后确认。");
+  }
+  updateSwitchSubmit();
+}
+function resetReview() {
+  reviewContext = null;
+  $("route").checked = false;
+  $("switch-confirm").value = "";
+  text("review-error", "");
+  $("switch-review").hidden = true;
+  $("switch-choose").hidden = false;
+  $("wizard-step-one").setAttribute("aria-current", "step");
+  $("wizard-step-two").removeAttribute("aria-current");
+}
+function startReview() {
+  const target = findInstance(switchTarget),
+    blocked = switchBlocker(target);
+  if (blocked) {
+    text("switch-blocker", blocked);
+    return;
+  }
+  reviewContext = {
+    target: target.id,
+    expected: expectedState(),
+    bound_epoch: target.report.bound_epoch,
+    public_ip: target.info?.public_ip || "",
+    operation: "move-" + crypto.randomUUID(),
+  };
+  $("route").checked = false;
+  $("switch-confirm").value = "";
+  text("review-source", instanceName(findInstance(snapshot.control.owner)));
+  text("review-target", instanceName(target));
+  text(
+    "review-ip",
+    target.info?.public_ip || "未登记公网 IP，请先确认目标机器的地址",
+  );
+  text("review-error", "");
+  $("review-dns").hidden = !snapshot.capabilities?.dns;
+  $("switch-choose").hidden = true;
+  $("switch-review").hidden = false;
+  $("wizard-step-one").removeAttribute("aria-current");
+  $("wizard-step-two").setAttribute("aria-current", "step");
+  updateSwitchSubmit();
+  $("route").focus();
+}
+function reviewValid() {
+  const target = findInstance(reviewContext?.target);
+  return (
+    reviewContext &&
+    sameState(reviewContext.expected) &&
+    reviewContext.bound_epoch === target?.report?.bound_epoch &&
+    reviewContext.public_ip === (target?.info?.public_ip || "") &&
+    !switchBlocker(target)
+  );
+}
+function updateSwitchSubmit() {
+  $("switch-submit").disabled =
+    !reviewValid() ||
+    !$("route").checked ||
+    $("switch-confirm").value !== "确认";
+}
+function makeCommand(i, action, expected = expectedState(), operation = "") {
+  let source = 0;
+  if (action === "handover-request") source = expected.epoch;
+  else if (
+    ["handover-resume", "handover-cancel", "source-resume"].includes(action)
+  ) {
+    const current =
+      action === "source-resume" ? i.report?.final_backup : i.report?.handover;
+    if (!current) throw new Error("此实例没有对应的操作。");
+    operation = current.id;
+    source = current.source_epoch;
+  }
+  return {
+    schema: 1,
+    id: "cmd-" + crypto.randomUUID(),
+    cluster_id: snapshot.control.cluster_id,
+    target: i.id,
+    action,
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 300000).toISOString(),
+    expected,
+    bound_epoch: i.report.bound_epoch,
+    operation_id: operation,
+    source_epoch: source,
+  };
+}
+async function submitSwitch() {
+  if (
+    !reviewValid() ||
+    !$("route").checked ||
+    $("switch-confirm").value !== "确认"
+  ) {
+    text("review-error", "请核对最新状态、入口地址，并输入“确认”。");
+    return;
+  }
+  const command = makeCommand(
+    findInstance(reviewContext.target),
+    "handover-request",
+    reviewContext.expected,
+    reviewContext.operation,
+  );
+  // Leave the wizard after one attempt. An uncertain response can only be retried
+  // with the same immutable command, never by silently generating a new ID.
+  resetReview();
+  await send(command);
+}
+function renderTools() {
+  const i = selected();
+  for (const node of document.querySelectorAll("[data-action]")) {
+    let why = commandBlocker(i);
+    const action = node.dataset.action;
+    if (!why && action.startsWith("handover-") && !i.report?.handover)
+      why = "此实例没有目标切换任务。";
+    if (!why && action === "source-resume" && !i.report?.final_backup)
+      why = "此实例没有源备份任务。";
+    if (
+      !why &&
+      action === "resume-local" &&
+      (i.id !== snapshot.control.owner ||
+        i.report.bound_epoch !== snapshot.control.epoch)
+    )
+      why = "所选实例不拥有当前服务归属。";
+    node.disabled = !!why;
+    node.title = why || "";
+    node.querySelector("small").textContent = why || node.dataset.description;
+  }
+  $("edit-selected").disabled = !i;
+  $("dns-open").disabled = !currentStatus() || !snapshot?.capabilities?.dns;
+  text(
+    "dns-capability",
+    snapshot?.capabilities?.dns
+      ? "读取或修改已配置的回源 A 记录"
+      : "未启用 API 管理，请在 Cloudflare 手动修改",
+  );
+  const abandonable =
+    currentStatus() &&
+    i?.pending &&
+    !i.result &&
+    Date.parse(i.pending.expires_at) <= Date.now();
+  $("abandon").disabled = !abandonable || inFlight;
+  text(
+    "abandon-description",
+    abandonable
+      ? "有一条过期且未收到认领回执的指令"
+      : i?.result?.state === "CLAIMED"
+        ? "指令已被认领，不能按过期清除"
+        : "没有可关闭的过期未认领指令",
+  );
+}
+function openAction(action) {
+  const i = selected(),
+    blocked = commandBlocker(i);
+  if (blocked) {
+    notice(blocked, true);
+    return;
+  }
+  actionContext = {
+    action,
+    target: i.id,
+    expected: expectedState(),
+    bound_epoch: i.report.bound_epoch,
+  };
+  text("action-dialog-title", actions[action][0]);
+  text("action-target", instanceLabel(i));
+  text("action-description", actions[action][1]);
+  $("action-confirm").value = "";
+  $("action-submit").disabled = true;
+  text("action-error", "");
+  $("action-dialog").showModal();
+}
+async function submitAction() {
+  const ctx = actionContext,
+    i = findInstance(ctx?.target);
+  if (
+    !ctx ||
+    $("action-confirm").value !== "确认" ||
+    !sameState(ctx.expected) ||
+    commandBlocker(i) ||
+    i.report.bound_epoch !== ctx.bound_epoch
+  ) {
+    text(
+      "action-error",
+      "状态已变化或尚未确认，请关闭此窗口，刷新后重新操作。",
+    );
+    return;
+  }
+  try {
+    const command = makeCommand(i, ctx.action, ctx.expected);
+    $("action-dialog").close();
+    await send(command);
+  } catch (e) {
+    text("action-error", e.message);
+  }
+}
+
+async function send(command) {
+  if (inFlight) return;
+  inFlight = true;
+  lastCommand = command;
+  lastResponse = null;
+  commandError = "";
+  receiptDismissed = false;
+  try {
+    localStorage.setItem(storageKey(), JSON.stringify(command));
+  } catch {
+    /* Private browsing may disable storage. Keep the in-memory original. */
+  }
+  renderReceipt();
+  renderTools();
+  updateSwitchSubmit();
+  try {
+    lastResponse = await api("/api/command", "POST", command);
+  } catch (e) {
+    commandError = e.message;
+  } finally {
+    inFlight = false;
+    await refresh();
+    renderReceipt();
+    renderTools();
+    updateSwitchSubmit();
+  }
+}
+function renderReceipt() {
+  $("receipt").hidden = !lastCommand || receiptDismissed;
+  if (!lastCommand) return;
+  const i = findInstance(lastCommand.target);
+  const result =
+    i?.pending?.id === lastCommand.id ? i.result : lastResponse?.result;
+  const state = result?.state;
+  let title = inFlight
+    ? "正在提交指令"
+    : receiptNames[state] ||
+      (commandError
+        ? "提交结果待确认"
+        : lastResponse?.submitted || i?.pending?.id === lastCommand.id
+          ? "已提交，等待实例接收"
+          : "上次指令，等待核对");
+  let message =
+    result?.error ||
+    commandError ||
+    "指令接收与服务完成是两个阶段，请继续查看实例状态。";
+  let tone =
+    ["FAILED", "UNKNOWN", "REJECTED"].includes(state) || commandError
+      ? "warn"
+      : "info";
+  if (state === "APPLIED" && lastCommand.action === "probe") {
+    title = "指令通路检查通过";
+    message = "实例已收到并处理这条检查指令，未启停服务。";
+    tone = "good";
+  }
+  if (state === "APPLIED" && lastCommand.action.startsWith("handover")) {
+    message =
+      "管理指令已处理，尚不代表交接已完成。请查看切换进度与当前服务实例。";
+    const c = snapshot?.control;
+    if (
+      ["handover-request", "handover-resume"].includes(lastCommand.action) &&
+      currentStatus() &&
+      c.phase === "ONLINE" &&
+      c.last_completed?.id === lastCommand.operation_id &&
+      c.owner === lastCommand.target &&
+      c.epoch === lastCommand.source_epoch + 1 &&
+      fresh(i) &&
+      i.report.serving &&
+      i.report.bound_epoch === c.epoch
+    ) {
+      title = "切换完成";
+      message = "新实例已获得服务归属，并报告正在提供服务。";
+      tone = "good";
+    }
+  }
+  if (commandError && !state)
+    message += " 先刷新核对；需要重试时，只重发这一条原指令。";
+  setBadge("receipt-badge", title, tone);
+  text(
+    "receipt-title",
+    (actions[lastCommand.action]?.[0] || lastCommand.action) +
+      " · " +
+      instanceName(i || { id: lastCommand.target }),
+  );
+  text("receipt-message", message);
+  text("result", {
+    command: lastCommand,
+    response: lastResponse,
+    result,
+    error: commandError || undefined,
+  });
+  $("retry").hidden = !!state && terminalReceipts.has(state);
+  $("retry").disabled =
+    inFlight ||
+    loginExpired ||
+    Date.parse(lastCommand.expires_at) <= Date.now();
+  if (!$("retry").hidden && Date.parse(lastCommand.expires_at) <= Date.now())
+    $("retry").title = "原指令已过期，请核对实例回执后再处理。";
+}
+async function retryCommand() {
+  if (!lastCommand || inFlight || loginExpired) return;
+  if (Date.parse(lastCommand.expires_at) <= Date.now()) {
+    notice("这条原指令已过期。请先核对回执，不会自动创建新指令。", true);
+    return;
+  }
+  if (
+    confirm(
+      `重发原指令 ${lastCommand.id}？目标：${instanceLabel(findInstance(lastCommand.target) || { id: lastCommand.target })}。不会创建新编号或改变原内容。`,
+    )
+  )
+    await send(lastCommand);
+}
+async function abandonCommand() {
+  const i = selected(),
+    pending = i?.pending;
+  if (
+    !currentStatus() ||
+    !pending ||
+    i.result ||
+    Date.parse(pending.expires_at) > Date.now() ||
+    inFlight
+  )
+    return;
+  if (
+    !confirm(
+      `关闭 ${instanceName(i)} 的过期未认领指令 ${pending.id}？不会改变服务归属。`,
+    )
+  )
+    return;
+  inFlight = true;
+  let failure = "";
+  try {
+    await api("/api/abandon-expired", "POST", { target: i.id, id: pending.id });
+    lastCommand = pending;
+    commandError = "";
+    receiptDismissed = false;
+  } catch (e) {
+    failure = e.message;
+  } finally {
+    inFlight = false;
+    await refresh();
+    if (failure) notice(failure, true);
+  }
+}
+
+function detailList(entries) {
+  const list = element("dl", "detail-list");
+  for (const [label, value] of entries) {
+    const row = element("div");
+    row.append(
+      element("dt", "", label),
+      element("dd", "", String(value ?? "尚未上报")),
+    );
+    list.append(row);
+  }
+  return list;
+}
+function rawDetails(label, value) {
+  const details = element("details", "technical");
+  details.append(
+    element("summary", "", label),
+    element("pre", "", JSON.stringify(value, null, 2)),
+  );
+  return details;
+}
+function openInstance(id, edit = false) {
+  infoTarget = id;
+  infoDirty = false;
+  renderInstanceDetail();
+  $("identity-editor").open = edit;
+  text("instance-info-result", "");
+  $("instance-dialog").showModal();
+}
+function fillInstanceInfo(force = false) {
+  const i = findInstance(infoTarget) || selected();
+  if (!force && infoDirty && infoTarget === i?.id) return;
+  infoTarget = i?.id;
+  infoETag = i?.info_etag ?? null;
+  infoDirty = false;
+  $("instance-name").value = i?.info?.name || "";
+  $("instance-ip").value = i?.info?.public_ip || "";
+  text("instance-info-target", i?.id || "请选择实例");
+}
+function renderInstanceDetail() {
+  const i = findInstance(infoTarget);
+  if (!i) return;
+  text("instance-dialog-title", instanceName(i));
+  const [status, tone] = role(i);
+  const parts = [
+    badge(status, tone),
+    detailList([
+      ["公网 IP", i.info?.public_ip || "未登记"],
+      ["主机名", i.agent?.host?.hostname || i.report?.hostname],
+      ["服务报告", time(i.report?.reported_at)],
+      ["指令轮询", time(i.agent?.reported_at)],
+      ["运行版本", i.agent?.software?.version],
+      ["实例编号", i.id],
+    ]),
+  ];
+  if (instanceError(i))
+    parts.push(element("p", "detail-note", instanceError(i)));
+  parts.push(
+    rawDetails("技术详情与原始报告", {
+      report: i.report,
+      agent: i.agent,
+      pending: i.pending,
+      result: i.result,
+    }),
+  );
+  $("instance-detail").replaceChildren(...parts);
+  fillInstanceInfo();
+}
+async function saveInstanceInfo() {
+  const i = findInstance(infoTarget);
+  if (!i || infoBusy || !currentStatus()) {
+    text("instance-info-result", "请先刷新有效状态。");
+    return;
+  }
+  const id = i.id;
+  infoBusy = true;
+  $("instance-info-save").disabled = true;
+  text("instance-info-result", "正在保存…");
+  try {
+    await api("/api/instance-info", "POST", {
+      id,
+      name: $("instance-name").value,
+      public_ip: $("instance-ip").value,
+      expected_etag: infoETag,
+    });
+    if (infoTarget === id) {
+      infoDirty = false;
+      text("instance-info-result", "已保存");
+    }
+    await refresh();
+  } catch (e) {
+    text("instance-info-result", e.message);
+  } finally {
+    infoBusy = false;
+    $("instance-info-save").disabled = false;
+  }
+}
+function openBackup() {
+  const source = backupSource(),
+    b = source?.agent?.backup_observation;
+  if (!b) return;
+  const note = b.database_startup_verified
+    ? "此记录包含数据库启动校验结果。"
+    : "此记录未包含数据库启动校验，文件校验通过不等同于完成恢复演练。";
+  $("backup-detail").replaceChildren(
+    detailList([
+      ["来源实例", instanceName(source)],
+      ["数据时间", time(b.data_time)],
+      ["校验时间", time(b.verified_at)],
+      ["校验范围", backupVerification(b)],
+      ["Telegram", b.telegram_included ? "已包含" : "未确认包含"],
+      [
+        "媒体文件",
+        b.media_included ? "包含在备份中" : "未打包，继续使用原 S3 存储",
+      ],
+      [
+        "备份方式",
+        b.consistency === "globally-quiesced"
+          ? "所有服务停写后备份"
+          : b.consistency === "independent-online-snapshots"
+            ? "各数据库独立在线快照"
+            : b.consistency,
+      ],
+      ["快照编号", b.snapshot_id],
+    ]),
+    element("p", "detail-note", note),
+    element(
+      "p",
+      "small muted",
+      "这里只显示实例上报的最近完成记录，不代表整个备份仓库的历史。正常切换会额外生成停写后的最终备份。",
+    ),
+    rawDetails("完整备份记录", b),
+  );
+  $("backup-dialog").showModal();
+}
+async function diagnostic() {
+  try {
+    const report = await api("/api/diagnostic");
+    const blob = new Blob([JSON.stringify(report, null, 2)], {
+        type: "application/json",
+      }),
+      url = URL.createObjectURL(blob),
+      a = element("a");
+    a.href = url;
+    a.download =
+      "matrix-diagnostic-" +
+      new Date().toISOString().replaceAll(":", "-") +
+      ".json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    notice(e.message, true);
+  }
+}
+async function readDNS() {
+  if (dnsBusy) return;
+  dnsBusy = true;
+  $("dns-read").disabled = true;
+  $("dns-write").disabled = true;
+  text("dns-message", "");
+  try {
+    dnsRecord = (await api("/api/dns")).record;
+    text("dns-state", dnsRecord.name + "\n当前回源 IP：" + dnsRecord.content);
+    $("ip").value =
+      findInstance(reviewContext?.target)?.info?.public_ip || dnsRecord.content;
+  } catch (e) {
+    dnsRecord = null;
+    text("dns-message", e.message);
+  } finally {
+    dnsBusy = false;
+    $("dns-read").disabled = false;
+    $("dns-write").disabled = !dnsRecord;
+  }
+}
+async function openDNS() {
+  if (!currentStatus() || !snapshot.capabilities?.dns) return;
+  $("dns-dialog").showModal();
+  await readDNS();
+}
+async function writeDNS() {
+  if (dnsBusy || !dnsRecord) return;
+  const ip = $("ip").value.trim();
+  if (
+    !confirm(
+      `将 ${dnsRecord.name} 的回源 IP 从 ${dnsRecord.content} 改为 ${ip}？此操作不会自动发起服务切换。`,
+    )
+  )
+    return;
+  dnsBusy = true;
+  $("dns-write").disabled = true;
+  $("dns-read").disabled = true;
+  try {
+    const result = await api("/api/dns", "POST", {
+      id: "dns-" + crypto.randomUUID(),
+      ip,
+      expected_ip: dnsRecord.content,
+    });
+    dnsRecord = result.record;
+    text("dns-state", dnsRecord.name + "\n当前回源 IP：" + dnsRecord.content);
+    text("dns-message", "DNS 已更新。核对入口后，再在切换页面提交交接。");
+  } catch (e) {
+    dnsRecord = null;
+    text("dns-message", e.message + " 请重新读取记录后核对。");
+  } finally {
+    dnsBusy = false;
+    $("dns-read").disabled = false;
+    $("dns-write").disabled = !dnsRecord;
+  }
+}
+
+for (const node of document.querySelectorAll("[data-page]"))
+  node.onclick = (e) => {
+    e.preventDefault();
+    navigate(node.dataset.page);
+  };
+for (const node of document.querySelectorAll("[data-close]"))
+  node.onclick = () => $(node.dataset.close).close();
+for (const node of document.querySelectorAll("[data-action]")) {
+  node.dataset.description = node.querySelector("small").textContent;
+  node.onclick = () => openAction(node.dataset.action);
+}
+window.addEventListener("hashchange", () => navigate(location.hash.slice(1)));
+$("refresh").onclick = () => {
+  loginExpired = false;
+  return refresh();
+};
+$("start-switch").onclick = () => navigate("switch");
+$("progress-tools").onclick = () => navigate("tools");
+$("switch-next").onclick = startReview;
+$("switch-back").onclick = () => {
+  resetReview();
+  renderSwitch();
+};
+$("route").onchange = $("switch-confirm").oninput = updateSwitchSubmit;
+$("switch-submit").onclick = submitSwitch;
+$("target").onchange = renderTools;
+$("edit-selected").onclick = () =>
+  selected() && openInstance(selected().id, true);
+$("instance-name").oninput = $("instance-ip").oninput = () => {
+  infoDirty = true;
+};
+$("instance-info-save").onclick = saveInstanceInfo;
+$("backup-details").onclick = openBackup;
+$("action-confirm").oninput = () => {
+  $("action-submit").disabled =
+    $("action-confirm").value !== "确认" || inFlight;
+};
+$("action-submit").onclick = submitAction;
+$("retry").onclick = retryCommand;
+$("abandon").onclick = abandonCommand;
+$("receipt-hide").onclick = () => {
+  receiptDismissed = true;
+  $("receipt").hidden = true;
+};
+for (const id of ["diagnostic", "overview-diagnostic", "receipt-diagnostic"])
+  $(id).onclick = diagnostic;
+$("dns-open").onclick = $("review-dns").onclick = openDNS;
+$("dns-read").onclick = readDNS;
+$("dns-write").onclick = writeDNS;
+try {
+  const saved = JSON.parse(localStorage.getItem(storageKey()) || "null");
+  if (
+    saved?.schema === 1 &&
+    actions[saved.action] &&
+    typeof saved.id === "string"
+  )
+    lastCommand = saved;
+} catch {
+  /* An unavailable storage or malformed previous entry is not a command. */
+}
+navigate(location.hash.slice(1));
+if (location.protocol === "https:") {
+  refresh();
+  setInterval(refresh, 15000);
+} else {
+  notice("请打开已部署的 Worker HTTPS 地址，通过 Cloudflare Access 登录。");
+}

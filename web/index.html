@@ -1,14 +1,475 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Matrix 集群管理</title><link rel="stylesheet" href="style.css"></head><body><main>
-<header><div><span class="eyebrow">MATRIX · PERSONAL CLUSTER</span><h1>实例管理</h1><p>通过 Worker 和 R2 管理，电脑关闭后实例继续执行。</p></div><div class="buttons"><button id="refresh">刷新状态</button><button id="diagnostic">导出诊断</button></div></header>
-<section><h2>登录</h2><p>使用 Cloudflare Access 身份登录，无需管理令牌。</p><a href="/">重新登录</a></section>
-<p id="notice" role="status">正在读取集群状态…</p>
-<div class="grid"><section><h2>集群归属</h2><div id="cluster" class="value">尚未连接</div><p id="owner"></p><p id="observed"></p></section><section><h2>切换进度</h2><div id="progress" class="value">—</div><p>REQUESTED → 停写 → 最终备份 → RELEASED → 恢复 → 校验 → STARTING → ONLINE</p></section></div>
-<section><h2>实例与备份</h2><div id="instances"></div></section>
-<section><h2>机器识别信息</h2><p id="instance-info-target">在下方选择目标实例后编辑。</p><div class="grid"><label>显示名称<input id="instance-name" maxlength="80" placeholder="例如 primary-vps 或备用 VPS"></label><label>公网 IPv4<input id="instance-ip" placeholder="例如 192.0.2.10"></label></div><button id="instance-info-save">保存所选实例名称与 IP</button><p id="instance-info-result" role="status"></p><p>保存到 R2，换电脑仍然可见。公网 IP 是人工登记信息；修改它不会更改 DNS 或服务归属。</p></section>
-<section><h2>管理操作</h2><p>指令写入 R2 后，由目标实例轮询执行。Worker 不授予运行资格，不修改 control.json。</p><div class="grid"><label>目标实例<select id="target"></select></label><label>动作<select id="action"><option value="probe">检查指令通路（不改变服务）</option><option value="handover-request">正常切换到所选实例</option><option value="handover-resume">继续目标实例的已有切换</option><option value="handover-cancel">取消目标实例切换请求</option><option value="fence-local">停用所选实例</option><option value="resume-local">恢复所选实例</option><option value="source-resume">中止最终备份并恢复源实例</option></select></label></div><p id="help"></p>
-<label>切换操作编号<input id="operation" spellcheck="false"></label><p>这是整个交接使用的 operation_id。每次指令另外生成 command_id，网络失败时保留原指令，禁止静默重放。</p>
-<label class="check"><input type="checkbox" id="route">已将 Cloudflare 回源 IP 指向本次切换的目标实例</label><div class="buttons"><label>输入“确认”<input id="confirm" autocomplete="off" placeholder="确认"></label><button id="execute">提交指令</button><button id="retry">重发上次原指令</button></div><pre id="result">尚未提交指令</pre><p>APPLIED 仅表示管理命令返回；以集群 ONLINE、新 owner、epoch 及实例 serving 状态判断切换是否完成。</p></section>
-<section><h2>人工干预</h2><p>过期且从未被认领的指令，可通过下面的操作写入取消回执。已有 CLAIMED 回执的指令不能清空，应先检查实例执行情况。强制接管和自动清理旧数据尚未实现。</p><label>需要关闭的过期 command_id<input id="abandon-id" spellcheck="false"></label><button id="abandon">关闭所选实例的过期未认领指令</button></section>
-<section><h2>Cloudflare 入口（可选）</h2><p>默认手动改 IP。配置 DNS API Secret 后，可以只修改明确指定的 A 记录；不改 SSL、缓存或 SaaS 绑定。</p><button id="dns-read">读取 DNS 记录</button><pre id="dns-state">未读取</pre><label>新 VPS 的 IPv4<input id="ip" placeholder="新实例 IP"></label><button id="dns-write">修改已配置 A 记录的 IP</button></section>
-<details><summary>完整状态与错误</summary><pre id="raw"></pre></details><footer>Cloudflare Access / Cloudflare Worker · 控制协议 1 · 没有 SSH、没有本地后台服务</footer>
-</main><script src="app.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light" />
+    <title>Matrix · 集群管理</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="Matrix 总览"
+        ><span class="brand-mark" aria-hidden="true">m<span>·</span></span
+        ><span>Matrix<span class="brand-caption">集群管理</span></span></a
+      >
+      <div class="nav-label">工作空间</div>
+      <nav aria-label="主导航">
+        <a href="#overview" data-page="overview" aria-current="page"
+          ><span class="nav-icon" aria-hidden="true">◫</span>总览</a
+        >
+        <a href="#switch" data-page="switch"
+          ><span class="nav-icon" aria-hidden="true">⇄</span>切换实例</a
+        >
+        <a href="#tools" data-page="tools"
+          ><span class="nav-icon" aria-hidden="true">⚙</span>运维工具</a
+        >
+      </nav>
+      <div class="sidebar-foot">
+        <span class="access-dot"></span>Cloudflare Access<span
+          >身份保护已启用</span
+        >
+      </div>
+    </aside>
+
+    <main>
+      <div class="topbar">
+        <span>个人服务 / <strong id="page-label">总览</strong></span>
+        <div class="topbar-actions">
+          <span id="updated">尚未读取状态</span
+          ><button id="refresh" class="button-quiet">
+            ↻ <span>刷新</span>
+          </button>
+        </div>
+      </div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <a id="login-link" class="login-link" href="/" hidden>重新登录 →</a>
+
+      <section id="page-overview" class="page" aria-labelledby="overview-title">
+        <header class="page-heading">
+          <div>
+            <p class="eyebrow">OVERVIEW</p>
+            <h1 id="overview-title" tabindex="-1">集群总览</h1>
+            <p>服务在哪里运行，数据备份到了哪里。</p>
+          </div>
+          <button id="start-switch" class="button-primary">
+            切换实例 <span aria-hidden="true">→</span>
+          </button>
+        </header>
+        <section class="service-card" aria-label="服务与备份摘要">
+          <div class="service-main">
+            <span id="health-badge" class="badge neutral">正在读取</span>
+            <h2 id="health-title">连接你的集群</h2>
+            <p id="health-description">读取服务状态与实例报告…</p>
+            <div class="service-location">
+              <span class="server-icon" aria-hidden="true">▤</span>
+              <div>
+                <span class="field-caption">当前服务实例</span
+                ><strong id="owner-name">—</strong
+                ><span id="owner-ip" class="mono muted">—</span>
+              </div>
+            </div>
+          </div>
+          <div class="backup-summary">
+            <div class="section-kicker">
+              <span class="small-square" aria-hidden="true">↗</span>最近备份
+            </div>
+            <div id="backup-age" class="backup-age">—</div>
+            <p id="backup-time">等待实例上报</p>
+            <div id="backup-verification" class="verification">
+              尚无校验信息
+            </div>
+            <p id="backup-description" class="small muted">
+              备份状态由实例定期上报。
+            </p>
+            <button id="backup-details" class="text-button" disabled>
+              查看备份详情 <span aria-hidden="true">↗</span>
+            </button>
+          </div>
+        </section>
+        <div id="attention" class="attention" hidden></div>
+        <section class="fleet-section" aria-labelledby="fleet-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="fleet-title">
+                实例 <span id="instance-count" class="count">—</span>
+              </h2>
+              <p>当前服务与备用机器</p>
+            </div>
+            <span class="small muted">状态每 15 秒刷新</span>
+          </div>
+          <div class="fleet-labels" aria-hidden="true">
+            <span>机器</span><span>服务状态</span><span>最近报告</span
+            ><span></span>
+          </div>
+          <div id="instances" class="fleet">
+            <div class="empty-state">正在读取实例…</div>
+          </div>
+        </section>
+        <section class="activity-section" aria-labelledby="activity-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="activity-title">最近指令</h2>
+              <p>查看管理操作是否已被实例接收</p>
+            </div>
+            <button id="overview-diagnostic" class="text-button">
+              导出诊断 ↗
+            </button>
+          </div>
+          <div id="activity" class="activity-list">
+            <p class="empty-inline">暂无指令记录</p>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="page-switch"
+        class="page"
+        aria-labelledby="switch-title"
+        hidden
+      >
+        <header class="page-heading">
+          <div>
+            <p class="eyebrow">HANDOVER</p>
+            <h1 id="switch-title" tabindex="-1">切换实例</h1>
+            <p>先完成旧实例的最终备份，再让新实例接管服务。</p>
+          </div>
+        </header>
+        <div id="switch-active" class="panel" hidden>
+          <span class="badge info">正在交接</span>
+          <h2 id="progress-title">切换进行中</h2>
+          <p id="progress-description"></p>
+          <ol id="progress-steps" class="progress-steps"></ol>
+          <p id="progress-note" class="small muted"></p>
+          <button id="progress-tools" class="button-secondary">
+            查看处理选项
+          </button>
+        </div>
+        <div id="switch-wizard">
+          <ol class="wizard-steps" aria-label="切换步骤">
+            <li id="wizard-step-one" aria-current="step">
+              <span>1</span>选择目标实例
+            </li>
+            <li id="wizard-step-two"><span>2</span>调整入口并确认</li>
+            <li><span>3</span>备份与接管</li>
+          </ol>
+          <div id="switch-choose" class="panel">
+            <div class="panel-heading">
+              <h2>服务要迁移到哪台机器？</h2>
+              <p id="switch-source">当前服务实例：—</p>
+            </div>
+            <div id="switch-targets" class="target-list"></div>
+            <p id="switch-blocker" class="small muted"></p>
+            <div class="panel-footer">
+              <p>切换期间服务会暂时不可用。</p>
+              <button id="switch-next" class="button-primary" disabled>
+                下一步 <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </div>
+          <div id="switch-review" class="panel" hidden>
+            <div class="panel-heading">
+              <h2>确认入口与切换目标</h2>
+              <p>此时新实例仍在等待；提交后才会开始交接。</p>
+            </div>
+            <div class="transfer">
+              <div>
+                <span class="field-caption">当前实例</span
+                ><strong id="review-source"></strong>
+              </div>
+              <span aria-hidden="true">→</span>
+              <div>
+                <span class="field-caption">目标实例</span
+                ><strong id="review-target"></strong
+                ><span id="review-ip" class="mono muted"></span>
+              </div>
+            </div>
+            <div class="instruction">
+              <span class="step-number">1</span>
+              <div>
+                <h3>先修改 Cloudflare 回源地址</h3>
+                <p>
+                  将 Matrix 入口的回源 IP 改成上方目标实例的公网
+                  IP，再继续。这里不会自动修改入口。
+                </p>
+                <button id="review-dns" class="text-button" hidden>
+                  管理已配置的 DNS 记录 ↗
+                </button>
+              </div>
+            </div>
+            <label class="check"
+              ><input type="checkbox" id="route" />我已将 Cloudflare
+              入口指向此目标实例</label
+            >
+            <div class="instruction">
+              <span class="step-number">2</span>
+              <div>
+                <h3>旧实例会停写、备份并释放服务归属</h3>
+                <p>
+                  新实例恢复并校验数据后才会启动。网页关闭不影响已提交的交接。
+                </p>
+              </div>
+            </div>
+            <label class="confirmation-label"
+              >输入“确认”开始切换<input
+                id="switch-confirm"
+                autocomplete="off"
+                placeholder="确认"
+            /></label>
+            <p id="review-error" class="form-message" role="status"></p>
+            <div class="panel-footer">
+              <button id="switch-back" class="button-quiet">← 返回选择</button
+              ><button id="switch-submit" class="button-primary" disabled>
+                开始切换
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="page-tools"
+        class="page"
+        aria-labelledby="tools-title"
+        hidden
+      >
+        <header class="page-heading">
+          <div>
+            <p class="eyebrow">OPERATIONS</p>
+            <h1 id="tools-title" tabindex="-1">运维工具</h1>
+            <p>检查实例，或处理未完成的操作。</p>
+          </div>
+          <button id="diagnostic" class="button-secondary">导出诊断</button>
+        </header>
+        <div class="tool-target">
+          <label for="target">操作哪台实例</label
+          ><select id="target"></select>
+        </div>
+        <div class="tool-grid">
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>连接与识别</h2>
+              <p>核对机器信息和指令通路。</p>
+            </div>
+            <button class="action-row" data-action="probe">
+              <span
+                ><strong>检查指令通路</strong
+                ><small>发送一条检查指令，不启停服务</small></span
+              ><span aria-hidden="true">→</span></button
+            ><button id="edit-selected" class="action-row">
+              <span
+                ><strong>修改名称与 IP</strong
+                ><small>便于识别机器，不更改 DNS</small></span
+              ><span aria-hidden="true">→</span>
+            </button>
+          </section>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>处理切换</h2>
+              <p>沿用原有切换任务，不创建新的交接。</p>
+            </div>
+            <button class="action-row" data-action="handover-resume">
+              <span
+                ><strong>继续目标实例切换</strong
+                ><small>从已有任务的进度继续</small></span
+              ><span aria-hidden="true">→</span></button
+            ><button class="action-row" data-action="handover-cancel">
+              <span
+                ><strong>取消目标实例请求</strong
+                ><small>源实例已认领时，需要先恢复源实例</small></span
+              ><span aria-hidden="true">→</span>
+            </button>
+          </section>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>服务干预</h2>
+              <p>这些操作会影响所选实例的服务状态。</p>
+            </div>
+            <button class="action-row" data-action="resume-local">
+              <span
+                ><strong>恢复当前归属实例</strong
+                ><small>仅限同一归属、同一代数据</small></span
+              ><span aria-hidden="true">→</span></button
+            ><button class="action-row" data-action="source-resume">
+              <span
+                ><strong>中止交接并恢复源实例</strong
+                ><small>仅限释放归属前；随后需把入口切回源实例</small></span
+              ><span aria-hidden="true">→</span></button
+            ><button class="action-row danger-text" data-action="fence-local">
+              <span
+                ><strong>停用实例</strong
+                ><small>关闭入口并停止该实例的服务</small></span
+              ><span aria-hidden="true">→</span>
+            </button>
+          </section>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>入口与指令</h2>
+              <p>处理网络入口和未被执行的过期指令。</p>
+            </div>
+            <button id="dns-open" class="action-row">
+              <span
+                ><strong>Cloudflare DNS</strong
+                ><small id="dns-capability">正在读取配置状态</small></span
+              ><span aria-hidden="true">→</span></button
+            ><button id="abandon" class="action-row">
+              <span
+                ><strong>关闭过期未认领指令</strong
+                ><small id="abandon-description">先选择实例</small></span
+              ><span aria-hidden="true">→</span>
+            </button>
+          </section>
+        </div>
+        <p class="tools-limit">
+          此版本支持正常交接和上述恢复操作，尚不支持强制接管或自动清理旧数据。
+        </p>
+        <details class="technical">
+          <summary>完整状态与错误</summary>
+          <pre id="raw">尚未读取</pre>
+        </details>
+      </section>
+
+      <section
+        id="receipt"
+        class="receipt"
+        aria-label="指令反馈"
+        aria-live="polite"
+        hidden
+      >
+        <div class="receipt-top">
+          <span id="receipt-badge" class="badge info">已提交</span
+          ><button
+            id="receipt-hide"
+            class="button-quiet"
+            aria-label="收起指令反馈"
+          >
+            ×
+          </button>
+        </div>
+        <h3 id="receipt-title"></h3>
+        <p id="receipt-message"></p>
+        <div class="receipt-actions">
+          <button id="retry" class="text-button">重发这条原指令</button
+          ><button id="receipt-diagnostic" class="text-button">导出诊断</button>
+        </div>
+        <details class="technical">
+          <summary>指令详情</summary>
+          <pre id="result"></pre>
+        </details>
+      </section>
+      <footer>
+        Matrix Admin<span>运行状态来自实例报告 · 不依赖当前浏览器持续运行</span>
+      </footer>
+    </main>
+
+    <dialog id="instance-dialog" aria-labelledby="instance-dialog-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">INSTANCE</p>
+          <h2 id="instance-dialog-title">实例详情</h2>
+        </div>
+        <button
+          class="button-quiet"
+          data-close="instance-dialog"
+          aria-label="关闭实例详情"
+        >
+          ×
+        </button>
+      </div>
+      <div id="instance-detail"></div>
+      <details id="identity-editor">
+        <summary>编辑名称与 IP</summary>
+        <p id="instance-info-target" class="small muted"></p>
+        <label
+          >显示名称<input
+            id="instance-name"
+            maxlength="80"
+            placeholder="例如：备用 VPS" /></label
+        ><label
+          >公网 IPv4<input
+            id="instance-ip"
+            placeholder="192.0.2.10"
+            inputmode="decimal"
+        /></label>
+        <p class="small muted">只更新识别信息，不修改 DNS 或服务归属。</p>
+        <button id="instance-info-save" class="button-primary">保存信息</button>
+        <p id="instance-info-result" role="status" class="form-message"></p>
+      </details>
+    </dialog>
+    <dialog id="backup-dialog" aria-labelledby="backup-dialog-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">BACKUP</p>
+          <h2 id="backup-dialog-title">最近备份详情</h2>
+        </div>
+        <button
+          class="button-quiet"
+          data-close="backup-dialog"
+          aria-label="关闭备份详情"
+        >
+          ×
+        </button>
+      </div>
+      <div id="backup-detail"></div>
+    </dialog>
+    <dialog id="action-dialog" aria-labelledby="action-dialog-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">CONFIRM ACTION</p>
+          <h2 id="action-dialog-title">确认操作</h2>
+        </div>
+        <button
+          class="button-quiet"
+          data-close="action-dialog"
+          aria-label="取消操作"
+        >
+          ×
+        </button>
+      </div>
+      <p id="action-target" class="action-target"></p>
+      <p id="action-description"></p>
+      <label
+        >输入“确认”继续<input
+          id="action-confirm"
+          autocomplete="off"
+          placeholder="确认"
+      /></label>
+      <p id="action-error" class="form-message" role="status"></p>
+      <div class="dialog-actions">
+        <button class="button-secondary" data-close="action-dialog">取消</button
+        ><button id="action-submit" class="button-primary" disabled>
+          确认执行
+        </button>
+      </div>
+    </dialog>
+    <dialog id="dns-dialog" aria-labelledby="dns-dialog-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">CLOUDFLARE</p>
+          <h2 id="dns-dialog-title">DNS 入口</h2>
+        </div>
+        <button
+          class="button-quiet"
+          data-close="dns-dialog"
+          aria-label="关闭 DNS 设置"
+        >
+          ×
+        </button>
+      </div>
+      <p>仅修改预先配置的 A 记录。请确认它就是当前服务的回源入口。</p>
+      <div id="dns-state" class="dns-record">尚未读取记录</div>
+      <button id="dns-read" class="text-button">重新读取记录</button
+      ><label
+        >目标 IPv4<input id="ip" placeholder="192.0.2.10" inputmode="decimal"
+      /></label>
+      <p class="small muted">修改 DNS 不会发起切换，也不代表旧连接已经排空。</p>
+      <button id="dns-write" class="button-primary" disabled>
+        修改回源 IP
+      </button>
+      <p id="dns-message" class="form-message" role="status"></p>
+    </dialog>
+    <noscript>请启用 JavaScript 以查看状态和管理实例。</noscript>
+    <script src="app.js"></script>
+  </body>
+</html>

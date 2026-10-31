@@ -12,6 +12,7 @@
     "check:source": "node scripts/audit-source.mjs"
   },
   "devDependencies": {
+    "linkedom": "0.18.12",
     "wrangler": "4.148.0"
   },
   "engines": {
