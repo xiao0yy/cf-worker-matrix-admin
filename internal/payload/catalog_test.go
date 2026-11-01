@@ -13,7 +13,7 @@ func capsuleFixture(t *testing.T) (string, string) {
 	t.Helper()
 	root := t.TempDir()
 	bundle := filepath.Join(root, "bundle")
-	files := map[string]string{"database/CURRENT": "MANIFEST-1\n", "database/MANIFEST-1": "database bytes", "telegram/data/telegram.db": "sqlite bytes", "telegram/data/config.yaml": "secret configuration", "control/source-local.json": "{\"cluster_id\":\"test\"}"}
+	files := map[string]string{"database/CURRENT": "MANIFEST-1\n", "database/MANIFEST-1": "database bytes", "database/archive/000004.log": "archived log", "telegram/data/telegram.db": "sqlite bytes", "telegram/data/config.yaml": "secret configuration", "control/source-local.json": "{\"cluster_id\":\"test\"}"}
 	var names []string
 	for p := range files {
 		names = append(names, p)
@@ -67,7 +67,7 @@ func TestConfigurationAndDatabaseRoundTrip(t *testing.T) {
 		t.Fatal("overwrote existing config")
 	}
 	download := filepath.Join(root, "download")
-	for _, p := range []string{"database/CURRENT", "database/MANIFEST-1", "telegram/data/telegram.db"} {
+	for _, p := range []string{"database/CURRENT", "database/MANIFEST-1", "database/archive/000004.log", "telegram/data/telegram.db"} {
 		src := filepath.Join(bundle, "payload", p)
 		b, _ := os.ReadFile(src)
 		dst := filepath.Join(download, "bundle/payload", p)
@@ -76,6 +76,22 @@ func TestConfigurationAndDatabaseRoundTrip(t *testing.T) {
 	}
 	if e = mergeData(download, restored); e != nil {
 		t.Fatal(e)
+	}
+	if e = mergeData(download, restored); e != nil {
+		t.Fatal("retry", e)
+	}
+	for _, p := range []string{"database/CURRENT", "database/archive/000004.log", "telegram/data/telegram.db"} {
+		a, err := os.Stat(filepath.Join(download, "bundle/payload", p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.Stat(filepath.Join(restored, "payload", p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(a, b) {
+			t.Fatal("copied database", p)
+		}
 	}
 	a, _ := os.ReadFile(filepath.Join(restored, "payload/telegram/data/config.yaml"))
 	if string(a) != "secret configuration" {
@@ -149,6 +165,19 @@ func TestDataMergeRejectsConfigInjectionAndMissingFiles(t *testing.T) {
 		}
 		if _, e := os.Stat(filepath.Join(out, "payload/database")); !os.IsNotExist(e) {
 			t.Fatal("partial data applied")
+		}
+	}
+}
+
+func TestArchiveWALAllowlistDoesNotAdmitOtherNestedData(t *testing.T) {
+	for _, p := range []string{"database/archive/000123.log", "database/archive/1.log"} {
+		if _, err := manifestEntries(strings.Repeat("a", 64) + "  ./" + p + "\n"); err != nil {
+			t.Fatal(p, err)
+		}
+	}
+	for _, p := range []string{"database/archive/../config.yaml", "database/archive/unexpected.log", "database/archive/000123.log/subfile", "database/other/1.log", "database/archive/000123.sst"} {
+		if _, err := manifestEntries(strings.Repeat("a", 64) + "  ./" + p + "\n"); err == nil {
+			t.Fatal("accepted unexpected nested payload", p)
 		}
 	}
 }

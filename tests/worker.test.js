@@ -31,7 +31,8 @@ async function fixture(){const CONTROL=new MemoryR2(),env={CONTROL,CLUSTER_ID:'t
  const control={schema:1,cluster_id:'test',revision:3,epoch:1,owner:'A',phase:'ONLINE',operation:null};
  await CONTROL.set(root+'control.json',control);
  await CONTROL.set(root+'instances/B.json',{schema:1,cluster_id:'test',instance_id:'B',bound_epoch:0,serving:false,reported_at:new Date().toISOString()});
- await CONTROL.set(root+'agents/B.json',{schema:1,cluster_id:'test',instance_id:'B',mailbox_protocol:1,preflight:{ready:true,epoch:1,checked_at:new Date().toISOString()},reported_at:new Date().toISOString()});
+ await CONTROL.set(root+'agents/B.json',{schema:1,cluster_id:'test',instance_id:'B',mailbox_protocol:1,handover_receipt_schema:2,preflight:{ready:true,handover_receipt_schema:2,epoch:1,checked_at:new Date().toISOString()},reported_at:new Date().toISOString()});
+ await CONTROL.set(root+'agents/A.json',{schema:1,cluster_id:'test',instance_id:'A',handover_receipt_schema:2,reported_at:new Date().toISOString()});
  CONTROL.writes=[];
  const commandTime=Date.now();
  const command={schema:1,id:'cmd-one',cluster_id:'test',target:'B',action:'handover-request',created_at:new Date(commandTime).toISOString(),expires_at:new Date(commandTime+300000).toISOString(),expected:{revision:3,epoch:1,owner:'A',phase:'ONLINE'},bound_epoch:0,operation_id:'move-one',source_epoch:1};
@@ -180,4 +181,25 @@ test('release discovery checks manifest hash and reports explicit installation o
  if(u.includes('/repos/'))return Response.json([{tag_name:'v0.3.0',assets:['manifest.json','SHA256SUMS','matrix-admin-linux-amd64.tar.gz'].map(name=>({name})),published_at:new Date().toISOString()}]);
  if(u.endsWith('/manifest.json'))return new Response(text);if(u.endsWith('/SHA256SUMS'))return new Response(hash+'  manifest.json\n');throw Error('Unexpected URL');};
  try{const a=await worker.fetch(request(f.env,'/api/releases'),f.env);assert.equal(a.status,200);const v=await a.json();assert.equal(v.automatic_install,false);assert.equal(v.releases[0].manifest_sha256,hash);await worker.fetch(request(f.env,'/api/releases'),f.env);assert.equal(calls,3);assert(f.CONTROL.writes.every(k=>k===root+'observations/releases.json'));}finally{globalThis.fetch=original;}
+});
+
+test('planned handover requires both readers and current preflight before R2 mutation',async()=>{
+ for(const who of ['A','B','preflight']){
+  const f=await fixture(),key=root+'agents/'+(who==='preflight'?'B':who)+'.json',agent=await f.CONTROL.value(key);
+  if(who==='preflight')delete agent.preflight.handover_receipt_schema;else delete agent.handover_receipt_schema;
+  await f.CONTROL.set(key,agent);f.CONTROL.writes=[];
+  await assert.rejects(()=>submit(f.env,f.command),who==='preflight'?/预检/:/升级/);
+  assert.equal(f.CONTROL.writes.length,0);
+ }
+});
+
+test('forced takeover upgrades target only; unavailable old source is not required',async()=>{
+ const parameters={snapshot_id:'a'.repeat(64),point_sha256:'b'.repeat(64),isolated_instances:['A'],isolation_method:'powered-off',note:'provider confirmed power off',accept_data_loss:true};
+ const f=await managedFixture('force-takeover',parameters);
+ f.CONTROL.objects.delete(root+'agents/A.json');
+ const agent=await f.CONTROL.value(root+'agents/B.json');delete agent.handover_receipt_schema;
+ await f.CONTROL.set(root+'agents/B.json',agent);f.CONTROL.writes=[];
+ await assert.rejects(()=>submit(f.env,f.command),/接管目标需先升级/);assert.equal(f.CONTROL.writes.length,0);
+ agent.handover_receipt_schema=2;await f.CONTROL.set(root+'agents/B.json',agent);
+ assert.equal((await submit(f.env,f.command)).submitted,true);
 });

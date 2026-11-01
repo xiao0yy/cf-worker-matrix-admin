@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -53,8 +54,11 @@ type Configuration struct {
 }
 
 func dataPath(p string) bool {
-	return (strings.HasPrefix(p, "database/") && !strings.Contains(strings.TrimPrefix(p, "database/"), "/")) || p == "telegram/data/telegram.db"
+	return (strings.HasPrefix(p, "database/") && !strings.Contains(strings.TrimPrefix(p, "database/"), "/")) || archiveLog.MatchString(p) || p == "telegram/data/telegram.db"
 }
+
+var archiveLog = regexp.MustCompile(`^database/archive/[0-9]+\.log$`)
+
 func allowedPayload(p string) bool {
 	if !payloadPath.MatchString(p) || strings.Contains(p, "..") || strings.HasPrefix(p, "/") || filepath.Clean(p) != p {
 		return false
@@ -83,8 +87,11 @@ func manifestEntries(s string) (map[string]string, error) {
 			return nil, errors.New("invalid configuration manifest entry")
 		}
 		p := line[68:]
-		if !allowedPayload(p) || p <= previous {
-			return nil, errors.New("unsupported, duplicated or unordered configuration path")
+		if !allowedPayload(p) {
+			return nil, fmt.Errorf("unsupported configuration path: %q", p)
+		}
+		if p <= previous {
+			return nil, fmt.Errorf("duplicated or unordered configuration path: %q", p)
 		}
 		entries[p] = line[:64]
 		previous = p
@@ -173,7 +180,7 @@ func packConfiguration(bundle, output string) error {
 			return e
 		}
 		if d.IsDir() {
-			if rel == "." || rel == "database" {
+			if rel == "." || rel == "database" || rel == "database/archive" {
 				return nil
 			}
 			if !configurationDirectory(rel) {
@@ -327,7 +334,7 @@ func unpackConfiguration(input, bundle string) error {
 }
 
 // Restic contributes only the two database trees. Validate all names and hashes
-// before moving them into the separately validated R2 configuration bundle.
+// before linking them into the separately validated R2 configuration bundle.
 func mergeData(input, bundle string) error {
 	raw, e := boundedFile(filepath.Join(bundle, "manifest.sha256"), 4<<20)
 	if e != nil {
@@ -349,7 +356,7 @@ func mergeData(input, bundle string) error {
 		}
 		if d.IsDir() {
 			switch rel {
-			case ".", "bundle", "bundle/payload", "bundle/payload/database", "bundle/payload/telegram", "bundle/payload/telegram/data":
+			case ".", "bundle", "bundle/payload", "bundle/payload/database", "bundle/payload/database/archive", "bundle/payload/telegram", "bundle/payload/telegram/data":
 				return nil
 			}
 			return errors.New("unexpected database restore directory")
@@ -389,8 +396,13 @@ func mergeData(input, bundle string) error {
 	// Destination is a new, private work tree; still reject symlink ancestors.
 	for _, key := range paths {
 		dest := filepath.Join(bundle, "payload", key)
-		if _, e = os.Lstat(dest); !errors.Is(e, os.ErrNotExist) {
-			return errors.New("database destination already exists")
+		if st, er := os.Lstat(dest); er == nil {
+			source, er := os.Lstat(filepath.Join(input, "bundle/payload", key))
+			if er != nil || !st.Mode().IsRegular() || !os.SameFile(st, source) {
+				return errors.New("database destination already exists")
+			}
+		} else if !errors.Is(er, os.ErrNotExist) {
+			return er
 		}
 		for p := filepath.Dir(dest); p != "." && p != "/"; p = filepath.Dir(p) {
 			st, e := os.Lstat(p)
@@ -420,7 +432,10 @@ func mergeData(input, bundle string) error {
 		if e = os.Chmod(filepath.Dir(dst), st.Mode().Perm()); e != nil {
 			return e
 		}
-		if e = os.Rename(src, dst); e != nil {
+		if _, e = os.Lstat(dst); e == nil {
+			continue
+		}
+		if e = os.Link(src, dst); e != nil {
 			return e
 		}
 	}

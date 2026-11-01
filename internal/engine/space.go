@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -41,9 +42,12 @@ func treeSize(path string) (uint64, error) {
 	return size, err
 }
 
-// Bundle, probe copy and rebuilt generation coexist. Check the selected final
-// point as well as the earlier preflight point: the database may have grown.
+// Large SST files are linked through download, bundle, probe and generation.
+// Reserve one database, one copy of mutable probe files, and working headroom.
 func (e *Engine) snapshotSpace(ctx context.Context, repo Repository, snapshot string) (uint64, error) {
+	return e.snapshotSpaceWithCache(ctx, repo, snapshot, "")
+}
+func (e *Engine) snapshotSpaceWithCache(ctx context.Context, repo Repository, snapshot, cache string) (uint64, error) {
 	stats, err := e.rest(ctx, repo, "", "stats", snapshot, "--mode", "restore-size", "--json")
 	if err != nil {
 		return 0, err
@@ -54,6 +58,64 @@ func (e *Engine) snapshotSpace(ctx context.Context, repo Repository, snapshot st
 	if json.Unmarshal(stats, &size) != nil || size.Bytes == 0 || size.Bytes > 1<<60 {
 		return 0, errors.New("invalid snapshot size")
 	}
-	need := size.Bytes*4 + (1 << 30)
-	return need, requireSpace(e.Host.Root, need)
+	files, err := e.databaseInventory(ctx, repo, snapshot)
+	if err != nil {
+		return 0, err
+	}
+	var total, mutable uint64
+	for path, n := range files {
+		if uint64(n) > 1<<60 || total > (1<<60)-uint64(n) {
+			return 0, errors.New("invalid snapshot inventory size")
+		}
+		total += uint64(n)
+		if !strings.HasPrefix(path, "/bundle/payload/database/") || !strings.HasSuffix(path, ".sst") {
+			mutable += uint64(n)
+		}
+	}
+	if total != size.Bytes {
+		return 0, errors.New("snapshot inventory and restore size differ")
+	}
+	need := total + mutable + (1 << 30)
+	remaining := need
+	if cache != "" {
+		allocated, err := allocatedSize(cache)
+		if err != nil {
+			return 0, err
+		}
+		if allocated > total {
+			allocated = total
+		}
+		remaining -= allocated
+	}
+	return need, requireSpace(e.Host.Root, remaining)
+}
+func allocatedSize(path string) (uint64, error) {
+	var size uint64
+	seen := map[[2]uint64]bool{}
+	err := filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if os.IsNotExist(err) && p == path {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		st, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !st.Mode().IsRegular() {
+			return errors.New("nonregular restore cache")
+		}
+		s := st.Sys().(*syscall.Stat_t)
+		key := [2]uint64{uint64(s.Dev), s.Ino}
+		if !seen[key] {
+			seen[key] = true
+			size += uint64(s.Blocks) * 512
+		}
+		return nil
+	})
+	return size, err
 }

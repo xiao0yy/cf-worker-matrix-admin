@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/control"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/payload"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
@@ -93,7 +94,7 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 	base := state
 	if op != "" {
 		base = filepath.Join(state, "finals", op)
-		full = true
+		full = false
 	}
 	if err = os.MkdirAll(base, 0700); err != nil {
 		return err
@@ -114,7 +115,11 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 	if _, err = e.permit(ctx, op, &meta.Binding); err != nil {
 		return err
 	}
-	if err = payload.Verify(bundle); err != nil {
+	manifest, err := local.ManifestCached(ctx, filepath.Join(bundle, "payload"), filepath.Join(state, "sst-hashes.json"))
+	if err != nil {
+		return err
+	}
+	if err = payload.VerifyManifest(bundle, manifest); err != nil {
 		return err
 	}
 	jobfile := filepath.Join(pending, "job.json")
@@ -136,13 +141,6 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 			return errors.New("missing recovery index ETag")
 		}
 		job = BackupJob{Schema: 1, Run: "backup-" + local.RandomID(), IndexMatch: etag, Repository: repo, Full: full}
-		var previous struct {
-			Verified string `json:"verified_at"`
-		}
-		previousBytes, readErr := local.ReadFile(filepath.Join(state, "last-full-verify.json"), 1<<20)
-		if readErr != nil || json.Unmarshal(previousBytes, &previous) != nil || !strings.HasPrefix(previous.Verified, e.Now().UTC().Format("2006-01-02")) {
-			job.Full = true
-		}
 		if err = local.JSON(jobfile, job); err != nil {
 			return err
 		}
@@ -153,6 +151,12 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 	}
 	if job.Schema != 1 || !local.SafeID(job.Run) {
 		return errors.New("invalid backup journal")
+	}
+	if op != "" && job.Full {
+		return errors.New("legacy final backup journal requires explicit reconciliation; refusing full source restore")
+	}
+	if job.Full != full {
+		return errors.New("pending backup verification mode differs; complete it explicitly or reconcile before starting another mode")
 	}
 	if err = e.verifyRepository(ctx, job.Repository); err != nil {
 		return err
@@ -169,7 +173,7 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 			return errors.New("ambiguous snapshot history")
 		}
 		if len(snapshots) == 0 {
-			if _, err = e.rest(ctx, job.Repository, pending, "backup", "--read-concurrency", "1", "--json", "--host", meta.Server, "--tag", "matrix-admin", "--tag", "recovery-v2", "--tag", job.Run, "bundle/payload/database", "bundle/payload/telegram/data/telegram.db"); err != nil {
+			if _, err = e.rest(ctx, job.Repository, pending, "backup", "--group-by", "host", "--ignore-ctime", "--read-concurrency", "1", "--json", "--host", meta.Server, "--tag", "matrix-admin", "--tag", "recovery-v2", "--tag", job.Run, "bundle/payload/database", "bundle/payload/telegram/data/telegram.db"); err != nil {
 				return err
 			}
 			b, err = e.rest(ctx, job.Repository, "", "snapshots", "--json", "--tag", job.Run)
@@ -194,11 +198,26 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 			if err != nil {
 				return err
 			}
-			if err = requireSpace(base, size*3+(512<<20)); err != nil {
+			// An explicitly requested full read uses one resumable download,
+			// not a new directory (or a three-database reserve) on every retry.
+			verify := filepath.Join(pending, "verification")
+			if err = local.SafePath(verify); err != nil {
 				return err
 			}
-			verify, err := os.MkdirTemp(base, "verify-")
+			cached, err := allocatedSize(filepath.Join(verify, "download"))
 			if err != nil {
+				return err
+			}
+			if cached > size {
+				cached = size
+			}
+			if err = requireSpace(base, size-cached+(512<<20)); err != nil {
+				return err
+			}
+			if err = os.MkdirAll(verify, 0700); err != nil {
+				return err
+			}
+			if err = os.RemoveAll(filepath.Join(verify, "bundle")); err != nil {
 				return err
 			}
 			if err = payload.Unpack(filepath.Join(pending, "configuration.json"), filepath.Join(verify, "bundle")); err != nil {
@@ -209,12 +228,6 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 			}
 			if err = e.verifyTelegram(ctx, filepath.Join(verify, "bundle/payload/telegram/data/telegram.db"), meta.Telegram); err != nil {
 				return err
-			}
-			if op != "" {
-				if err = e.probe(ctx, filepath.Join(verify, "bundle"), meta, filepath.Join(verify, "probe")); err != nil {
-					return err
-				}
-				job.Startup = true
 			}
 			if err = os.RemoveAll(verify); err != nil {
 				return err
@@ -275,29 +288,14 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 	database := filepath.Join(bundle, "payload/database")
 	if op != "" {
 		if !c.cleanStop() {
-			return errors.New("final database copy requires clean stop")
+			return errors.New("final database view requires clean stop")
 		}
 		stamp = s.Final.Cutoff
-		if _, err = os.Stat(database); err == nil {
-			// The writer is still fenced; preserve the partial copy and restart staging.
-			if err = os.Rename(database, filepath.Join(base, "interrupted-database-"+local.RandomID())); err != nil {
-				return err
-			}
-		}
-		before, err := local.Manifest(data)
-		if err != nil {
+		if err = local.LinkFrozenTree(ctx, data, database); err != nil {
 			return err
 		}
-		if err = local.CopyTree(data, database); err != nil {
+		if err = e.action(ctx, "final-verify", op, s.Instance, s.Epoch); err != nil {
 			return err
-		}
-		after, err := local.Manifest(data)
-		if err != nil {
-			return err
-		}
-		copied, err := local.Manifest(database)
-		if err != nil || before != after || before != copied {
-			return errors.New("frozen database changed")
 		}
 	} else {
 		request := filepath.Join(preparing, "request.json")
@@ -441,14 +439,14 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 	if err = local.JSON(filepath.Join(bundle, "metadata.json"), meta); err != nil {
 		return err
 	}
-	manifest, err := local.Manifest(filepath.Join(bundle, "payload"))
+	manifest, err := local.ManifestCached(ctx, filepath.Join(bundle, "payload"), filepath.Join(root, "backup-state/tuwunel-restic/sst-hashes.json"))
 	if err != nil {
 		return err
 	}
 	if err = local.Atomic(filepath.Join(bundle, "manifest.sha256"), []byte(manifest), 0600); err != nil {
 		return err
 	}
-	if err = payload.Verify(bundle); err != nil {
+	if err = payload.VerifyManifest(bundle, manifest); err != nil {
 		return err
 	}
 	capsule := filepath.Join(preparing, "configuration.json")
@@ -471,10 +469,10 @@ func copyApplicationConfiguration(project, config string) error {
 	}
 	return local.Copy(filepath.Join(project, "s3/media.env"), filepath.Join(config, "s3/media.env"))
 }
-func (e *Engine) verifyTree(ctx context.Context, r Repository, snapshot, bundle string) error {
+func (e *Engine) databaseInventory(ctx context.Context, r Repository, snapshot string) (map[string]int64, error) {
 	b, err := e.rest(ctx, r, "", "ls", "--json", "--recursive", snapshot, "/bundle")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	remote := map[string]int64{}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -488,14 +486,24 @@ func (e *Engine) verifyTree(ctx context.Context, r Repository, snapshot, bundle 
 			Size   int64  `json:"size"`
 		}
 		if err = json.Unmarshal([]byte(line), &n); err != nil {
-			return err
+			return nil, err
 		}
 		if n.Struct == "node" && n.Type == "file" {
 			if _, ok := remote[n.Path]; ok {
-				return errors.New("duplicate remote file")
+				return nil, errors.New("duplicate remote file")
+			}
+			if n.Size < 0 {
+				return nil, errors.New("invalid remote file size")
 			}
 			remote[n.Path] = n.Size
 		}
+	}
+	return remote, nil
+}
+func (e *Engine) verifyTree(ctx context.Context, r Repository, snapshot, bundle string) error {
+	remote, err := e.databaseInventory(ctx, r, snapshot)
+	if err != nil {
+		return err
 	}
 	source := map[string]int64{}
 	for _, rel := range []string{"database", "telegram/data/telegram.db"} {
@@ -572,10 +580,10 @@ func (e *Engine) publish(ctx context.Context, m Metadata, pending string, j Back
 		return p, nil, err
 	}
 	if m.Operation != "" {
-		if !j.Full || !j.Startup || m.Consistency != "globally-quiesced" {
-			return p, nil, errors.New("final backup not fully verified")
+		if !j.Verified || j.Full || j.Startup || m.Consistency != "globally-quiesced" {
+			return p, nil, errors.New("final snapshot inventory has not been verified")
 		}
-		receipt := map[string]any{"schema": 1, "operation_id": m.Operation, "cluster_id": e.Cluster, "source_instance_id": m.Binding.Instance, "source_epoch": m.Binding.Epoch, "cutoff_time": m.Time, "snapshot_id": j.Snapshot, "point_key": key, "point_sha256": local.Digest(point), "full_restore_verified": true, "database_startup_verified": true, "verified_at": j.VerifiedAt}
+		receipt := control.FinalReceipt{Schema: 2, Operation: m.Operation, Cluster: e.Cluster, Instance: m.Binding.Instance, Epoch: m.Binding.Epoch, Cutoff: m.Time, Snapshot: j.Snapshot, PointKey: key, PointHash: local.Digest(point), SnapshotVerified: true, Verification: "database-tree", VerifiedAt: j.VerifiedAt}
 		return p, receipt, nil
 	}
 	index := release.JSON(Index{2, 2, key, local.Digest(point)})

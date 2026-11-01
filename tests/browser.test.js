@@ -93,8 +93,9 @@ function fixture() {
     report: { reported_at: now, serving, bound_epoch: serving ? 1 : 0 },
     agent: {
       reported_at: now,
+      handover_receipt_schema: 2,
       software: { version: "0.2.1" },
-      preflight: {ready:true,epoch:1,checked_at:now},
+      preflight: {ready:true,handover_receipt_schema:2,epoch:1,checked_at:now},
       host: { hostname: name },
     },
     pending: null,
@@ -675,4 +676,18 @@ test("source or target report failures do not suggest preflight as the remedy", 
     assert.equal(card.querySelector('[data-focus-key="node-b-preflight"]'), null);
     assert.equal(card.querySelector("input").disabled, true);
   }
+});
+
+test("switch explains incompatible source and target before offering handover",async()=>{
+ for(const i of [0,1]){
+  const state=fixture();delete state.instances[i].agent.handover_receipt_schema;
+  const {card}=await switchBrowser(state);
+  assert.equal(card.querySelector(".badge").textContent,"需要升级");
+  assert.match(card.querySelector(".target-reason").textContent,/源实例和目标实例/);
+  assert.equal(card.querySelector("input").disabled,true);
+ }
+ const state=fixture();delete state.instances[1].agent.preflight.handover_receipt_schema;
+ const {card}=await switchBrowser(state);
+ assert.equal(card.querySelector(".badge").textContent,"预检已失效");
+ assert.match(card.querySelector(".target-reason").textContent,/旧版交接流程/);
 });

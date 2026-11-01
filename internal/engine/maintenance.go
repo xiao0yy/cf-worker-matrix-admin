@@ -27,6 +27,7 @@ type PreflightReport struct {
 	At            string `json:"checked_at"`
 	Required      uint64 `json:"required_bytes"`
 	Ready         bool   `json:"ready"`
+	ReceiptSchema int    `json:"handover_receipt_schema"`
 }
 
 func (e *Engine) Preflight(ctx context.Context, snapshot, hash string) (PreflightReport, error) {
@@ -102,7 +103,7 @@ func (e *Engine) preflight(ctx context.Context, snapshot, hash string) (out Pref
 			return out, err
 		}
 	}
-	out = PreflightReport{1, s.Instance, e.Cluster, s.Control.Epoch, p.Snapshot, local.Digest(raw), p.ConfigurationHash, e.stamp(), need, true}
+	out = PreflightReport{1, s.Instance, e.Cluster, s.Control.Epoch, p.Snapshot, local.Digest(raw), p.ConfigurationHash, e.stamp(), need, true, 2}
 	err = local.JSON(filepath.Join(e.Host.Root, "deploy/control/state/preflight.json"), out)
 	return out, err
 }

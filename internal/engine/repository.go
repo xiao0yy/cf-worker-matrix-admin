@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/payload"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/storage"
 	"net/url"
 	"os"
@@ -111,7 +112,11 @@ func (e *Engine) repository(ctx context.Context, p Point) (Repository, error) {
 }
 func (e *Engine) rest(ctx context.Context, r Repository, dir string, args ...string) ([]byte, error) {
 	env := []string{"RESTIC_REPOSITORY=s3:" + r.Endpoint + "/" + r.Bucket + "/" + r.Path, "RESTIC_PASSWORD=" + r.Password, "AWS_ACCESS_KEY_ID=" + r.Access, "AWS_SECRET_ACCESS_KEY=" + r.Secret, "AWS_DEFAULT_REGION=" + r.Region, "RESTIC_CACHE_DIR=" + filepath.Join(e.Host.Root, "agent/cache/restic"), "GOMAXPROCS=1", "RESTIC_READ_CONCURRENCY=1"}
-	return e.Runner.Run(ctx, Command{Name: filepath.Join(e.ReleaseDir, "restic"), Args: append([]string{"--compression", "auto", "-o", "s3.connections=2"}, args...), Dir: dir, Env: env, Timeout: 90 * time.Minute})
+	timeout := 90 * time.Minute
+	if len(args) > 0 && (args[0] == "backup" || args[0] == "restore") {
+		timeout = -1
+	}
+	return e.Runner.Run(ctx, Command{Name: filepath.Join(e.ReleaseDir, "restic"), Args: append([]string{"--quiet", "--compression", "auto", "-o", "s3.connections=2"}, args...), Dir: dir, Env: env, Timeout: timeout})
 }
 func (e *Engine) verifyRepository(ctx context.Context, r Repository) error {
 	b, err := e.rest(ctx, r, "", "cat", "config")
@@ -128,10 +133,43 @@ func (e *Engine) verifyRepository(ctx context.Context, r Repository) error {
 }
 func (e *Engine) downloadData(ctx context.Context, r Repository, snapshot, bundle, work string) error {
 	download := filepath.Join(work, "download")
-	if _, err := os.Stat(download); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("restore destination already exists")
+	binding := struct {
+		Repository string `json:"repository_id"`
+		Snapshot   string `json:"snapshot_id"`
+	}{r.ID, snapshot}
+	marker := filepath.Join(work, "download-binding.json")
+	if b, err := os.ReadFile(marker); err == nil {
+		if string(b) != string(release.JSON(binding)) {
+			return errors.New("restore cache belongs to another snapshot")
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if _, er := os.Lstat(download); !errors.Is(er, os.ErrNotExist) {
+			return errors.New("unclassified restore destination already exists")
+		}
+		if err = local.Atomic(marker, release.JSON(binding), 0600); err != nil {
+			return err
+		}
+	} else {
+		return err
 	}
-	if _, err := e.rest(ctx, r, "", "restore", snapshot, "--target", download, "--verify"); err != nil {
+	if err := filepath.WalkDir(download, func(p string, d os.DirEntry, err error) error {
+		if os.IsNotExist(err) && p == download {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && !d.Type().IsRegular() {
+			return errors.New("unsafe restore cache entry")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := local.SafePath(download); err != nil {
+		return err
+	}
+	if _, err := e.rest(ctx, r, "", "restore", snapshot, "--target", download, "--overwrite", "always", "--verify"); err != nil {
 		return err
 	}
 	if err := payload.Merge(download, bundle); err != nil {

@@ -102,8 +102,13 @@ func (r ExecRunner) Run(ctx context.Context, c Command) ([]byte, error) {
 	if c.Timeout == 0 {
 		c.Timeout = 5 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
-	defer cancel()
+	// Negative means a data transfer is bounded by the caller's cancellation,
+	// not database size or bandwidth. Zero retains the normal command timeout.
+	if c.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Dir = c.Dir
 	cmd.Env = append([]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LANG=C.UTF-8"}, c.Env...)

@@ -682,6 +682,8 @@ function switchAvailability(i) {
     return stop("源实例未就绪", "请先确认源实例正常在线，才能发起正常交接。");
   if (i.report.serving !== false)
     return stop("目标仍在服务", "目标实例仍报告正在服务，请先检查归属。");
+  if (i.agent?.handover_receipt_schema !== 2 || owner.agent?.handover_receipt_schema !== 2)
+    return stop("需要升级", "源实例和目标实例都需升级到支持交接凭据 v2 的版本，再重新执行预检。");
   const pre = i.agent?.preflight;
   const observation = window.Management?.preflightObservation(i);
   const task = observation?.task;
@@ -752,6 +754,8 @@ function switchAvailability(i) {
         "，已超过 10 分钟有效期。请重新执行预检。",
       { preflight: true },
     );
+  if (pre.handover_receipt_schema !== 2)
+    return stop("预检已失效", "预检来自旧版交接流程，请升级后重新执行预检。", { preflight: true });
   return { label: "可作为目标", reason: "" };
 }
 function renderSwitch() {

@@ -20,19 +20,30 @@ type StopProof struct {
 	FinishedAt  string `json:"finished_at"`
 }
 type FinalReceipt struct {
-	Schema          int    `json:"schema"`
-	Operation       string `json:"operation_id"`
-	Cluster         string `json:"cluster_id"`
-	Instance        string `json:"source_instance_id"`
-	Epoch           uint64 `json:"source_epoch"`
-	Cutoff          string `json:"cutoff_time"`
-	Snapshot        string `json:"snapshot_id"`
-	PointKey        string `json:"point_key"`
-	PointHash       string `json:"point_sha256"`
-	Verified        bool   `json:"full_restore_verified"`
-	StartupVerified bool   `json:"database_startup_verified"`
-	VerifiedAt      string `json:"verified_at"`
+	Schema           int    `json:"schema"`
+	Operation        string `json:"operation_id"`
+	Cluster          string `json:"cluster_id"`
+	Instance         string `json:"source_instance_id"`
+	Epoch            uint64 `json:"source_epoch"`
+	Cutoff           string `json:"cutoff_time"`
+	Snapshot         string `json:"snapshot_id"`
+	PointKey         string `json:"point_key"`
+	PointHash        string `json:"point_sha256"`
+	Verified         bool   `json:"full_restore_verified"`
+	StartupVerified  bool   `json:"database_startup_verified"`
+	SnapshotVerified bool   `json:"snapshot_verified,omitempty"`
+	Verification     string `json:"verification,omitempty"`
+	VerifiedAt       string `json:"verified_at"`
 }
+
+// Schema 2 records a committed snapshot and its file inventory. It deliberately
+// does not claim a full restore or a database startup on the source. The target
+// must still restore, verify and probe its generation before any start intent.
+func (r FinalReceipt) BackupVerified() bool {
+	return (r.Schema == 1 && r.Verified && r.StartupVerified) ||
+		(r.Schema == 2 && r.SnapshotVerified && r.Verification == "database-tree" && !r.Verified && !r.StartupVerified)
+}
+
 type FinalOperation struct {
 	Isolation *Isolation    `json:"external_isolation,omitempty"`
 	ID        string        `json:"id"`
@@ -348,7 +359,7 @@ func (c *Controller) finalAction(ctx context.Context, action, instance string, e
 			return errors.New("verified final receipt missing")
 		}
 		var r FinalReceipt
-		if json.Unmarshal(b, &r) != nil || r.Schema != 1 || r.Operation != id || r.Cluster != c.cfg.Cluster || r.Instance != instance || r.Epoch != epoch || r.Cutoff != op.Cutoff || !r.Verified || !r.StartupVerified || !hex64(r.Snapshot) || !hex64(r.PointHash) || r.PointKey != "cluster/"+c.cfg.Cluster+"/recovery/v2/points/"+r.Snapshot+".json" || r.VerifiedAt == "" {
+		if json.Unmarshal(b, &r) != nil || !r.BackupVerified() || r.Operation != id || r.Cluster != c.cfg.Cluster || r.Instance != instance || r.Epoch != epoch || r.Cutoff != op.Cutoff || !hex64(r.Snapshot) || !hex64(r.PointHash) || r.PointKey != "cluster/"+c.cfg.Cluster+"/recovery/v2/points/"+r.Snapshot+".json" || r.VerifiedAt == "" {
 			return errors.New("invalid or mismatched final receipt")
 		}
 		op.Receipt = &r

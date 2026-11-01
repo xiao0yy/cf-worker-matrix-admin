@@ -23,7 +23,7 @@ func pairFixture(t *testing.T) (*Controller, *Controller, *finalAuthority, *fina
 	if e := b.saveLocked(); e != nil {
 		t.Fatal(e)
 	}
-	if e := atomicJSON(filepath.Join(bcfg.StateDir, "preflight.json"), map[string]any{"schema": 1, "instance_id": "b", "cluster_id": "test", "epoch": 2, "checked_at": a.now().UTC().Format(time.RFC3339Nano), "ready": true}); e != nil {
+	if e := atomicJSON(filepath.Join(bcfg.StateDir, "preflight.json"), map[string]any{"schema": 1, "instance_id": "b", "cluster_id": "test", "epoch": 2, "checked_at": a.now().UTC().Format(time.RFC3339Nano), "ready": true, "handover_receipt_schema": 2}); e != nil {
 		t.Fatal(e)
 	}
 	root := filepath.Join(bcfg.Generations, "generation", "rebuilt")
@@ -216,5 +216,40 @@ func TestHandoverCancelRequiresSourceToRemainUnclaimed(t *testing.T) {
 	}
 	if hcall(b, "request") == nil {
 		t.Fatal("closed request ID reused")
+	}
+}
+
+func TestInventoryReceiptStillRequiresTargetStartupProof(t *testing.T) {
+	a, b, s, _, _, root := pairFixture(t)
+	makePairReady(t, a, b, root)
+	if err := hcall(a, "release"); err != nil {
+		t.Fatal(err)
+	}
+	if err := hcall(b, "claim"); err != nil {
+		t.Fatal(err)
+	}
+	if err := hcall(b, "validating"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "recovery-state/result.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := hcall(b, "bind"); err == nil {
+		t.Fatal("target admitted without startup proof")
+	}
+	if s.state.Phase != "VALIDATING" || gateCode(b) != 403 {
+		t.Fatal("opened target")
+	}
+}
+func TestOldPreflightCannotStartNewHandover(t *testing.T) {
+	_, b, s, _, _, _ := pairFixture(t)
+	if err := atomicJSON(filepath.Join(b.cfg.StateDir, "preflight.json"), map[string]any{"schema": 1, "instance_id": "b", "cluster_id": "test", "epoch": 2, "checked_at": b.now().UTC().Format(time.RFC3339Nano), "ready": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hcall(b, "request"); err == nil {
+		t.Fatal("accepted preflight from older runtime")
+	}
+	if s.state.Phase != "ONLINE" {
+		t.Fatal("stopped source")
 	}
 }

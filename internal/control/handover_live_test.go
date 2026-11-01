@@ -88,7 +88,7 @@ func TestLivePlannedHandover(t *testing.T) {
 	if gateCode(a) != 204 {
 		t.Fatal("source not online")
 	}
-	if err = atomicJSON(filepath.Join(b.cfg.StateDir, "preflight.json"), map[string]any{"schema": 1, "instance_id": "b", "cluster_id": id, "epoch": 2, "checked_at": b.now().UTC().Format(time.RFC3339Nano), "ready": true}); err != nil {
+	if err = atomicJSON(filepath.Join(b.cfg.StateDir, "preflight.json"), map[string]any{"schema": 1, "instance_id": "b", "cluster_id": id, "epoch": 2, "checked_at": b.now().UTC().Format(time.RFC3339Nano), "ready": true, "handover_receipt_schema": 2}); err != nil {
 		t.Fatal(err)
 	}
 	if err = hcall(b, "request"); err != nil {

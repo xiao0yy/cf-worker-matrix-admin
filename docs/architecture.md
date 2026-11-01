@@ -34,14 +34,44 @@ R2 保存配置胶囊、恢复点、仓库凭据和控制状态。B2 只保存 r
 ## 备份提交
 
 在线备份获取原生 checkpoint 与 SQLite backup API 快照。二者各自一致，但
-不是跨数据库事务。restic 去重上传数据库；每日至少一次完整回读、全文件哈希
-与 SQLite 校验，其余执行远端清单核对。恢复点发布前验证公开工具可获取，
+不是跨数据库事务。restic 增量上传数据库，并核对远端文件清单与大小。定时备份
+不自动完整回读；完整回读与恢复演练只在操作者明确发起时执行。恢复点发布前验证公开工具可获取，
 依次上传不可变依赖、恢复点，再以 ETag 条件写 latest，最后记录本地成功。
 任一步失败保留 pending 和既有成功记录；同 run ID 重试不重复建立快照。
 
 最终备份关闭入口、停止 Telegram 与 Tuwunel，核实干净退出和容器身份，再
-复制冻结数据库。完整回读后，在 `--network none` 容器中启动数据库验证，
-生成绑定 operation/instance/epoch 的 receipt。最终备份不擅自修改 latest。
+在同一文件系统创建冻结数据库的硬链接视图；跨文件系统明确报错，不退回整库复制。
+源机增量上传并核对快照清单后，生成绑定 operation/instance/epoch 的 schema 2 receipt。
+其中 `snapshot_verified: true`、`verification: database-tree` 只证明上传与清单核对完成，
+不声称已完整回读或启动验证。源机不回下载数据库、不做隔离启动；最终备份不修改 latest。
+新目标恢复后仍须完整内容校验及 `--network none` 隔离启动验证，才允许绑定并上线。
+旧 schema 1 已完成凭据仍可读取；新交接要求两端报告 `handover_receipt_schema: 2`，
+目标重新预检。混用旧版实例时，网页、API、目标 controller 和源 worker 会阻止推进。
+
+### 数据量与重试成本
+
+- 源机对不可变 SST 按路径、设备、inode、大小和 mtime 缓存 SHA256；新增或变化的
+  SST 才重新读内容，可变文件始终重新计算。缓存只在本机使用，新机器重新建立。
+  这是变更检测，不是磁盘坏块检查；不是每次扫描文件内容才叫增量上传。
+- restic 用同一 Matrix 域名分组选择上次快照，避免最终备份工作路径改变后失去父快照。
+  使用 `--ignore-ctime`，避免 checkpoint 新建硬链接触发未变化 SST 的全量重读；
+  仍比较 inode、mtime、大小。首次备份、缓存缺失或表压缩重写后，相应数据仍需读取。
+- 目标首次恢复必须下载所需数据库。相同操作与恢复点使用固定工作目录，restic 比较
+  已下载内容，仅下载缺失或不匹配的块。重试仍可能扫描本地数据，不能承诺零 IO。
+  数据传输受任务取消控制，不再用固定 90 分钟限制大库传输；元数据命令仍有限时。
+- 下载、配置合并和最终 generation 共用文件。隔离启动只对不可变 SST 使用硬链接，
+  可变 RocksDB 元数据/WAL 和 SQLite 复制到 probe；测试不能修改恢复原件。
+  验证通过后移动数据库到 generation，移除下载与 probe 链接，然后才准入写者。
+- 空间预检按一份数据库、可变 probe 文件的额外副本及 1 GiB 余量计算；重试扣除
+  已分配的下载缓存空间，稀疏文件逻辑长度不算已下载数据。数据库启动时的压缩重写、
+  后续增长、Docker 镜像另需空间，这个估算不是容量上限保证。
+- 交接失败写入持久暂停记录，需检查后显式继续。冻结视图重试只接受同 inode 文件；
+  不创建 `interrupted-database-*` 全量副本。未完成恢复复用缓存，已绑定 generation
+  拒绝再次恢复。旧流程留下的未知目录保留并报错，不能自动清理或覆盖。
+
+硬链接依据 [RocksDB checkpoint 语义](https://github.com/facebook/rocksdb/wiki/Checkpoints)；
+增量判断与续传依据 [restic 变更检测](https://restic.readthedocs.io/en/stable/040_backup.html#file-change-detection)
+和 [恢复规则](https://restic.readthedocs.io/en/stable/050_restore.html)。
 
 ## 常规交接
 
@@ -50,7 +80,7 @@ stateDiagram-v2
     ONLINE --> REQUESTED: 用户指定源与目标
     REQUESTED --> QUIESCING: 旧实例关闭入口
     QUIESCING --> QUIESCED: 写者全部停止
-    QUIESCED --> SNAPSHOTTING: 冻结备份与完整验证
+    QUIESCED --> SNAPSHOTTING: 冻结增量备份与清单核对
     SNAPSHOTTING --> RELEASED: 提交不可变 receipt 并释放
     RELEASED --> RESTORING: 目标认领下一 epoch
     RESTORING --> VALIDATING: 数据恢复与隔离启动验证

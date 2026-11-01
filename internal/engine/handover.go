@@ -19,6 +19,33 @@ func (e *Engine) recordError(path, op, step string, err error) {
 	}
 	_ = local.JSON(filepath.Join(path, "error.json"), map[string]any{"operation_id": op, "step": step, "at": e.stamp(), "error": err.Error()})
 }
+func (e *Engine) requireFinalReader(ctx context.Context, target string) error {
+	if !local.SafeID(target) {
+		return errors.New("invalid target identity")
+	}
+	if err := e.connect(); err != nil {
+		return err
+	}
+	b, _, err := e.Store.Get(ctx, "cluster/"+e.Cluster+"/agents/"+target+".json")
+	if err != nil {
+		return err
+	}
+	var r struct {
+		Instance string `json:"instance_id"`
+		Cluster  string `json:"cluster_id"`
+		Schema   int    `json:"handover_receipt_schema"`
+		At       string `json:"reported_at"`
+	}
+	if json.Unmarshal(b, &r) != nil || r.Instance != target || r.Cluster != e.Cluster || r.Schema != 2 {
+		return errors.New("target must support final receipt schema 2 before handover")
+	}
+	at, err := time.Parse(time.RFC3339Nano, r.At)
+	age := e.Now().Sub(at)
+	if err != nil || age < -30*time.Second || age > 90*time.Second {
+		return errors.New("target capability report is stale")
+	}
+	return nil
+}
 func (e *Engine) Final(ctx context.Context, op, id string, epoch uint64) (err error) {
 	unlock, err := local.Lock(filepath.Join(e.Host.Root, "agent/operation.lock"))
 	if err != nil {
@@ -116,7 +143,7 @@ func (e *Engine) final(ctx context.Context, op, id string, epoch uint64) (err er
 		}
 		published := filepath.Join(state, "finals", op, "published.json")
 		if _, err = os.Stat(published); errors.Is(err, os.ErrNotExist) {
-			if err = e.backup(ctx, root, op, true); err != nil {
+			if err = e.backup(ctx, root, op, false); err != nil {
 				return err
 			}
 		}
@@ -124,7 +151,7 @@ func (e *Engine) final(ctx context.Context, op, id string, epoch uint64) (err er
 		if err = local.ReadJSON(published, &receipt); err != nil {
 			return err
 		}
-		if receipt.Operation != op || receipt.Instance != id || receipt.Epoch != epoch || !receipt.StartupVerified || !receipt.Verified {
+		if receipt.Operation != op || receipt.Instance != id || receipt.Epoch != epoch || !receipt.BackupVerified() {
 			return errors.New("final receipt identity differs")
 		}
 		if err = e.action(ctx, "final-verify", op, id, epoch); err != nil {
@@ -229,11 +256,23 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 		return err
 	}
 	step := "inspect"
-	defer func() { e.recordError(base, op.ID, step, err) }()
+	defer func() {
+		e.recordError(base, op.ID, step, err)
+		if err != nil {
+			pauseErr := local.JSON(filepath.Join(e.Host.Root, "agent/handover-paused.json"), map[string]any{"at": e.stamp(), "operation_id": op.ID, "reason": "handover failed; inspect error and explicitly continue", "step": step})
+			if pauseErr != nil {
+				err = errors.Join(err, pauseErr)
+			}
+		}
+	}()
 	ctl := func(action string) error { return e.action(ctx, action, op.ID, s.Instance, op.Epoch) }
 	if op.Mode == "planned" && op.Source == s.Instance {
 		switch s.Control.Phase {
 		case "REQUESTED", "QUIESCING", "QUIESCED", "SNAPSHOTTING":
+			step = "check-target-reader"
+			if err = e.requireFinalReader(ctx, op.Target); err != nil {
+				return err
+			}
 			step = "final-backup"
 			if err = e.final(ctx, op.ID, s.Instance, op.Epoch); err != nil {
 				return err
@@ -280,7 +319,7 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 		var restored Restored
 		record := filepath.Join(base, "recovery.json")
 		if _, err = os.Stat(record); errors.Is(err, os.ErrNotExist) {
-			restored, err = e.restore(ctx, receipt.Snapshot, receipt.PointHash)
+			restored, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, filepath.Join(e.Host.Root, "generations", "handover-"+op.ID))
 			if err != nil {
 				return err
 			}

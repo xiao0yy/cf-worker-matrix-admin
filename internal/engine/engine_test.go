@@ -184,7 +184,7 @@ func bundleFixture(t *testing.T, base string) (string, Metadata) {
 	db := filepath.Join(bundle, "payload/telegram/data/telegram.db")
 	must(t, os.MkdirAll(filepath.Dir(db), 0700))
 	database(t, db)
-	for name, content := range map[string]string{"database/CURRENT": "MANIFEST-1\n", "database/MANIFEST-1": "rocks fixture", "config/docker-compose.yml": "compose fixture", "config/s3/media.env": "S3=fixture", "control/source-local.json": "{}", "nginx/matrix.conf": "nginx fixture", "nginx/00-matrix-common.conf": "common fixture", "telegram/data/config.yaml": "bridge config", "telegram/data/registration.yaml": "bridge registration", "telegram/config/docker-compose.yml": "bridge compose"} {
+	for name, content := range map[string]string{"database/CURRENT": "MANIFEST-1\n", "database/MANIFEST-1": "rocks fixture", "database/archive/000003.log": "archived WAL", "config/docker-compose.yml": "compose fixture", "config/s3/media.env": "S3=fixture", "control/source-local.json": "{}", "nginx/matrix.conf": "nginx fixture", "nginx/00-matrix-common.conf": "common fixture", "telegram/data/config.yaml": "bridge config", "telegram/data/registration.yaml": "bridge registration", "telegram/config/docker-compose.yml": "bridge compose"} {
 		write(t, filepath.Join(bundle, "payload", name), content)
 	}
 	e := testEngine(t)
@@ -237,6 +237,31 @@ func TestRealResticDatabaseOnlyRoundTrip(t *testing.T) {
 		t.Fatal("ambiguous snapshot")
 	}
 	must(t, e.verifyTree(context.Background(), r, snaps[0].ID, bundle))
+	// Moving from a periodic checkpoint to a final operation changes absolute
+	// input paths and inode ctime. It must still reuse the previous file data.
+	second := t.TempDir()
+	must(t, local.LinkFrozenTree(context.Background(), filepath.Join(bundle, "payload/database"), filepath.Join(second, "bundle/payload/database")))
+	must(t, local.LinkFrozenTree(context.Background(), filepath.Join(bundle, "payload/telegram/data"), filepath.Join(second, "bundle/payload/telegram/data")))
+	output, err := e.rest(context.Background(), r, second, "backup", "--group-by", "host", "--ignore-ctime", "--json", "--tag", "incremental-test", "bundle/payload/database", "bundle/payload/telegram/data/telegram.db")
+	must(t, err)
+	unchanged := 0
+	for _, line := range strings.Split(string(output), "\n") {
+		var summary struct {
+			Type      string `json:"message_type"`
+			Unchanged int    `json:"files_unmodified"`
+			Changed   int    `json:"files_changed"`
+			New       int    `json:"files_new"`
+		}
+		if json.Unmarshal([]byte(line), &summary) == nil && summary.Type == "summary" {
+			unchanged = summary.Unchanged
+			if summary.Changed != 0 || summary.New != 0 {
+				t.Fatal("reread unchanged files", summary)
+			}
+		}
+	}
+	if unchanged < 4 {
+		t.Fatalf("missing incremental reuse: %s", output)
+	}
 	work := t.TempDir()
 	merged := filepath.Join(work, "bundle")
 	must(t, payload.Unpack(capsule, merged))
@@ -245,14 +270,16 @@ func TestRealResticDatabaseOnlyRoundTrip(t *testing.T) {
 	if _, err = os.Stat(filepath.Join(work, "download/bundle/payload/config")); !os.IsNotExist(err) {
 		t.Fatal("configuration duplicated in B2")
 	}
-	if err = e.downloadData(context.Background(), r, snaps[0].ID, merged, work); err == nil {
-		t.Fatal("overwrote prior restore")
+	must(t, e.downloadData(context.Background(), r, snaps[0].ID, merged, work))
+	if err = e.downloadData(context.Background(), r, strings.Repeat("f", 64), merged, work); err == nil {
+		t.Fatal("reused restore cache for another snapshot")
 	}
 }
 
 type memoryObjects struct {
 	data       map[string][]byte
 	failLatest bool
+	failPoints bool
 	puts       int
 }
 
@@ -265,7 +292,7 @@ func (s *memoryObjects) Get(_ context.Context, k string) ([]byte, string, error)
 }
 func (s *memoryObjects) Put(_ context.Context, k string, b []byte, match string) error {
 	old, ok := s.data[k]
-	if s.failLatest && strings.HasSuffix(k, "/latest.json") {
+	if (s.failLatest && strings.HasSuffix(k, "/latest.json")) || (s.failPoints && strings.Contains(k, "/points/")) {
 		return errors.New("simulated offline R2")
 	}
 	if match == "*" && ok || match != "" && match != "*" && (!ok || match != `"`+local.Digest(old)+`"`) {
@@ -586,13 +613,21 @@ func TestBackupCopiesRuntimeS3ConfigurationWithoutAdjacentFiles(t *testing.T) {
 		t.Fatal("non-runtime files entered the S3 recovery configuration")
 	}
 }
-func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T) {
+func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T)    { testBackupRetry(t, false) }
+func TestFinalBackupNeverDownloadsOrStartsDatabaseOnSource(t *testing.T) { testBackupRetry(t, true) }
+func testBackupRetry(t *testing.T, final bool) {
 	bin := os.Getenv("RESTIC_TEST_BINARY")
 	if bin == "" {
 		t.Skip("set RESTIC_TEST_BINARY; mandatory in release CI")
 	}
 	e := testEngine(t)
 	s := Status{Cluster: e.Cluster, Instance: "node-a", Epoch: 1, Serving: true, Control: &control.State{Owner: "node-a", Epoch: 1, Phase: "ONLINE"}}
+	if final {
+		s.Serving = false
+		s.Blocked = true
+		s.Control.Phase = "SNAPSHOTTING"
+		s.Final = &control.FinalOperation{ID: "handover-one", Source: s.Instance, Epoch: 1, Phase: "SNAPSHOTTING", Cutoff: e.stamp()}
+	}
 	fakeController(t, e, &s, nil)
 	e.ReleaseDir = runtimeFixture(t, "0.2.0")
 	desc, err := release.Describe(e.ReleaseDir)
@@ -602,6 +637,10 @@ func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T) {
 	real := e.Runner
 	e.Runner = runFunc(func(ctx context.Context, c Command) ([]byte, error) {
 		if filepath.Base(c.Name) == "restic" {
+			if final && strings.Contains(" "+strings.Join(c.Args, " ")+" ", " restore ") {
+				t.Fatal("final source downloaded its snapshot")
+			}
+
 			c.Name = bin
 			c.Env = append(c.Env, "RESTIC_REPOSITORY="+repoDir)
 		}
@@ -616,9 +655,16 @@ func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T) {
 	must(t, json.Unmarshal(raw, &config))
 	repo.ID = config.ID
 	state := filepath.Join(e.Host.Root, "backup-state/tuwunel-restic")
+	if final {
+		state = filepath.Join(state, "finals", "handover-one")
+	}
 	pending := filepath.Join(state, "pending")
 	bundle, meta := bundleFixture(t, pending)
 	meta.Software = desc
+	if final {
+		meta.Operation = "handover-one"
+		meta.Consistency = "globally-quiesced"
+	}
 	saveBundle(t, bundle, meta)
 	must(t, payload.Pack(bundle, filepath.Join(pending, "configuration.json")))
 	capsule, err := os.ReadFile(filepath.Join(pending, "configuration.json"))
@@ -632,9 +678,19 @@ func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T) {
 	key := e.prefix() + "/points/" + old.Snapshot + ".json"
 	objects := &memoryObjects{data: map[string][]byte{old.RepositoryObject: repoBytes, old.ConfigurationObject: capsule, key: oldRaw, e.prefix() + "/latest.json": release.JSON(Index{2, 2, key, local.Digest(oldRaw)})}, failLatest: true}
 	e.Store = objects
+	if final {
+		objects.failLatest = false
+		objects.failPoints = true
+	}
+	backup := func() error {
+		if final {
+			return e.backup(context.Background(), e.Host.Root, "handover-one", true)
+		}
+		return e.Backup(context.Background(), true)
+	}
 	success := filepath.Join(state, "last-success.json")
 	write(t, success, `{"previous":true}`)
-	if err = e.Backup(context.Background(), true); err == nil {
+	if err = backup(); err == nil {
 		t.Fatal("publication failure ignored")
 	}
 	b, err := os.ReadFile(success)
@@ -648,7 +704,8 @@ func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T) {
 		t.Fatal("retry checkpoint missing")
 	}
 	objects.failLatest = false
-	must(t, e.Backup(context.Background(), true))
+	objects.failPoints = false
+	must(t, backup())
 	if _, err = os.Stat(pending); !os.IsNotExist(err) {
 		t.Fatal("completed pending retained")
 	}
@@ -668,4 +725,16 @@ func TestBackupRetryReusesSnapshotAndCommitsSuccessLast(t *testing.T) {
 	if done.Snapshot != first.Snapshot {
 		t.Fatal("wrong success receipt")
 	}
+	if final {
+		var receipt control.FinalReceipt
+		must(t, local.ReadJSON(filepath.Join(state, "published.json"), &receipt))
+		if receipt.Schema != 2 || !receipt.BackupVerified() || receipt.StartupVerified || receipt.Verified || first.Full {
+			t.Fatal("misleading receipt", receipt)
+		}
+		if string(objects.data[e.prefix()+"/latest.json"]) != string(release.JSON(Index{2, 2, key, local.Digest(oldRaw)})) {
+			t.Fatal("final rewrote latest")
+		}
+		testRestoreResume(t, e, &s, repoDir, bin, receipt)
+	}
+
 }

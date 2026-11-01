@@ -27,7 +27,7 @@ func (e *Engine) probe(ctx context.Context, bundle string, m Metadata, work stri
 		return err
 	}
 	matrix := filepath.Join(work, "database")
-	if err := local.CopyTree(filepath.Join(bundle, "payload/database"), matrix); err != nil {
+	if err := local.CloneRocksDB(ctx, filepath.Join(bundle, "payload/database"), matrix); err != nil {
 		return err
 	}
 	name := "matrix-probe-" + local.RandomID()

@@ -83,8 +83,13 @@ export async function submit(env,input) {
   if(!sameExpected(c.expected,state))throw new Fault(409,'权威状态已变化，请刷新后重新确认');
   if(!instance.report_fresh||!instance.agent_fresh||instance.agent?.schema!==1||instance.agent?.cluster_id!==env.CLUSTER_ID||instance.agent?.mailbox_protocol!==1||instance.agent?.instance_id!==c.target||instance.report?.schema!==1||instance.report?.instance_id!==c.target||instance.report?.cluster_id!==env.CLUSTER_ID||instance.report?.bound_epoch!==c.bound_epoch)throw new Fault(409,'实例或指令轮询报告缺失、过期或身份不符；不能提交');
   if(c.action==='handover-request'&&(state.phase!=='ONLINE'||state.owner===c.target||c.source_epoch!==state.epoch))throw new Fault(409,'当前不满足正常切换条件');
+  if(c.action==='handover-request'){
+    const source=await jsonObject(env.CONTROL,base+'agents/'+state.owner+'.json');
+    if(instance.agent.handover_receipt_schema!==2||source?.value?.handover_receipt_schema!==2||source.value.instance_id!==state.owner||source.value.cluster_id!==env.CLUSTER_ID||!isFresh(source.value))throw new Fault(409,'源和目标都需升级到支持交接凭据 v2 的版本，并重新上报状态');
+  }
+  if(c.action==='force-takeover'&&instance.agent.handover_receipt_schema!==2)throw new Fault(409,'接管目标需先升级到支持增量交接与恢复续传的版本；不要求离线源实例升级');
   validateManagementTarget(c,state,instance);
-  if(c.action==='handover-request'&&(!instance.agent?.preflight?.ready||instance.agent.preflight.epoch!==state.epoch||!isFresh(instance.agent.preflight,'checked_at',600)))throw new Fault(409,'先对目标实例执行切换预检，预检有效期 10 分钟');
+  if(c.action==='handover-request'&&(!instance.agent?.preflight?.ready||instance.agent.preflight.handover_receipt_schema!==2||instance.agent.preflight.epoch!==state.epoch||!isFresh(instance.agent.preflight,'checked_at',600)))throw new Fault(409,'先对目标实例执行切换预检，预检有效期 10 分钟');
   const slotKey=base+'commands/'+c.target+'/pending.json',slot=await jsonObject(env.CONTROL,slotKey);
   if(slot){
     const receipt=await jsonObject(env.CONTROL,base+'commands/'+c.target+'/results/'+slot.value.id+'.json');

@@ -50,7 +50,7 @@ func (c *Controller) verifyStopped(ctx context.Context, op FinalOperation) error
 }
 func validFinalReceipt(op FinalOperation, cluster string) bool {
 	r := op.Receipt
-	return r != nil && r.Schema == 1 && r.Operation == op.ID && r.Cluster == cluster && r.Instance == op.Source && r.Epoch == op.Epoch && r.Cutoff == op.Cutoff && r.Verified && r.StartupVerified && hex64(r.Snapshot) && hex64(r.PointHash) && r.PointKey == "cluster/"+cluster+"/recovery/v2/points/"+r.Snapshot+".json"
+	return r != nil && r.BackupVerified() && r.Operation == op.ID && r.Cluster == cluster && r.Instance == op.Source && r.Epoch == op.Epoch && r.Cutoff == op.Cutoff && r.VerifiedAt != "" && hex64(r.Snapshot) && hex64(r.PointHash) && r.PointKey == "cluster/"+cluster+"/recovery/v2/points/"+r.Snapshot+".json"
 }
 func (c *Controller) handoverAction(ctx context.Context, action, instance string, epoch uint64, id string) error {
 	c.finalMu.Lock()
@@ -108,15 +108,16 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 		}
 
 		var pre struct {
-			Schema   int    `json:"schema"`
-			Instance string `json:"instance_id"`
-			Cluster  string `json:"cluster_id"`
-			Epoch    uint64 `json:"epoch"`
-			At       string `json:"checked_at"`
-			Ready    bool   `json:"ready"`
+			Schema        int    `json:"schema"`
+			Instance      string `json:"instance_id"`
+			Cluster       string `json:"cluster_id"`
+			Epoch         uint64 `json:"epoch"`
+			At            string `json:"checked_at"`
+			Ready         bool   `json:"ready"`
+			ReceiptSchema int    `json:"handover_receipt_schema"`
 		}
 		raw, er := os.ReadFile(filepath.Join(c.cfg.StateDir, "preflight.json"))
-		if er != nil || json.Unmarshal(raw, &pre) != nil || pre.Schema != 1 || !pre.Ready || pre.Instance != instance || pre.Cluster != c.cfg.Cluster || pre.Epoch != epoch {
+		if er != nil || json.Unmarshal(raw, &pre) != nil || pre.Schema != 1 || !pre.Ready || pre.ReceiptSchema != 2 || pre.Instance != instance || pre.Cluster != c.cfg.Cluster || pre.Epoch != epoch {
 			return errors.New("target preflight required before stopping the source")
 		}
 		at, er := time.Parse(time.RFC3339Nano, pre.At)

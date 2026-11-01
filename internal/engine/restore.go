@@ -30,6 +30,9 @@ func (e *Engine) Restore(ctx context.Context, snapshot, hash string) (Restored, 
 	return e.restore(ctx, snapshot, hash)
 }
 func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, error) {
+	return e.restoreAt(ctx, snapshot, hash, "")
+}
+func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Restored, error) {
 	var result Restored
 	if _, err := release.Current(e.ReleaseDir); err != nil {
 		return result, err
@@ -46,12 +49,62 @@ func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, 
 	if err = requireSpace(dir, 1<<30); err != nil {
 		return result, err
 	}
-	work, err := os.MkdirTemp(dir, "recovery-")
+	if work == "" {
+		work, err = os.MkdirTemp(dir, "recovery-")
+		if err != nil {
+			return result, err
+		}
+	} else {
+		if filepath.Dir(work) != dir || local.SafePath(work) != nil {
+			return result, errors.New("unsafe recovery workspace")
+		}
+		if err = os.MkdirAll(work, 0700); err != nil {
+			return result, err
+		}
+	}
+	active, s, err := e.active(ctx)
 	if err != nil {
 		return result, err
 	}
+	if active == filepath.Join(work, "rebuilt") || (s.Handover != nil && s.Handover.Root == filepath.Join(work, "rebuilt")) {
+		return result, errors.New("recovery workspace is already bound; cannot replay restore")
+	}
+	if previous, er := os.ReadFile(filepath.Join(work, "point.json")); er == nil {
+		if string(previous) != string(raw) {
+			return result, errors.New("recovery workspace belongs to another point")
+		}
+	} else if !errors.Is(er, os.ErrNotExist) {
+		return result, er
+	} else {
+		entries, er := os.ReadDir(work)
+		if er != nil {
+			return result, er
+		}
+		if len(entries) != 0 {
+			return result, errors.New("unclassified recovery workspace; retained for explicit reconciliation")
+		}
+	}
+	resultFile := filepath.Join(work, "result.json")
+	if _, er := os.Lstat(resultFile); er == nil {
+		if err = local.ReadJSON(resultFile, &result); err != nil {
+			return result, err
+		}
+		if result.Work != work || result.Root != filepath.Join(work, "rebuilt") || result.Snapshot != point.Snapshot || result.Hash != local.Digest(raw) || !result.Matrix || !result.Telegram || result.Production {
+			return result, errors.New("completed restore identity differs")
+		}
+		return result, finishRestore(work)
+	} else if !errors.Is(er, os.ErrNotExist) {
+		return result, er
+	}
 	if err = local.Atomic(filepath.Join(work, "point.json"), raw, 0600); err != nil {
 		return result, err
+	}
+	// Only this unbound generation's disposable views are rebuilt. The pinned
+	// restic download cache remains, so an interrupted transfer resumes in place.
+	for _, name := range []string{"bundle", "probe", "rebuilt"} {
+		if err = os.RemoveAll(filepath.Join(work, name)); err != nil {
+			return result, err
+		}
 	}
 	bundle, meta, err := e.configuration(ctx, point, work)
 	if err != nil {
@@ -67,7 +120,7 @@ func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, 
 	if err = e.verifyRepository(ctx, repo); err != nil {
 		return result, err
 	}
-	if _, err = e.snapshotSpace(ctx, repo, point.Snapshot); err != nil {
+	if _, err = e.snapshotSpaceWithCache(ctx, repo, point.Snapshot, filepath.Join(work, "download")); err != nil {
 		return result, err
 	}
 	e.progress("download-and-verify-databases")
@@ -84,9 +137,14 @@ func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, 
 		return result, err
 	}
 	root := filepath.Join(work, "rebuilt")
-	copies := map[string]string{"config": "deploy/tuwunel", "database": "deploy/tuwunel/data", "telegram/config": "deploy/telegram", "telegram/data": "deploy/telegram/data", "nginx": "deploy/nginx"}
+	copies := map[string]string{"config": "deploy/tuwunel", "telegram/config": "deploy/telegram", "nginx": "deploy/nginx"}
 	for src, dst := range copies {
 		if err = local.CopyTree(filepath.Join(bundle, "payload", src), filepath.Join(root, dst)); err != nil {
+			return result, err
+		}
+	}
+	for src, dst := range map[string]string{"database": "deploy/tuwunel/data", "telegram/data": "deploy/telegram/data"} {
+		if err = os.Rename(filepath.Join(bundle, "payload", src), filepath.Join(root, dst)); err != nil {
 			return result, err
 		}
 	}
@@ -111,7 +169,16 @@ func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, 
 	if err = local.JSON(filepath.Join(work, "result.json"), result); err != nil {
 		return result, err
 	}
-	return result, nil
+	return result, finishRestore(work)
+}
+func finishRestore(work string) error {
+	// Remove cache/probe links before the generation can be admitted as a writer.
+	for _, name := range []string{"download", "probe"} {
+		if err := os.RemoveAll(filepath.Join(work, name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (e *Engine) activateFiles(ctx context.Context, r Restored, p Point) error {
 	if !strings.HasPrefix(r.Root, e.Host.Root+"/generations/") || r.Root != filepath.Join(r.Work, "rebuilt") {
