@@ -159,12 +159,48 @@ window.Management = (() => {
     render();
     if (tab === "updates") loadReleases();
   }
+  function openTasks(id) {
+    $("target").value = id;
+    navigate("tools");
+    selectTab("tasks");
+    renderTools();
+    $("tab-tasks").focus();
+  }
+  function preflightObservation(i) {
+    const available = !loadError && Date.now() - catalogAt < 45000;
+    const byId = new Map(
+      (available ? catalog.tasks : [])
+        .filter(
+          (t) => t.request?.target === i.id && t.request.action === "preflight",
+        )
+        .map((t) => [t.request.id, t]),
+    );
+    for (const t of i.agent?.active_tasks || []) {
+      if (t.action !== "preflight") continue;
+      const previous = byId.get(t.id);
+      if (
+        !previous ||
+        Date.parse(t.updated_at) > Date.parse(previous.updated_at)
+      )
+        byId.set(t.id, t);
+    }
+    const task = [...byId.values()].sort(
+      (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
+    )[0];
+    return {
+      task,
+      stage: stages[task?.stage] || task?.stage || "等待实例报告",
+      unavailable: !!loadError,
+    };
+  }
   async function load(force = false, append = false) {
     if (
       !snapshot ||
       loading ||
       (!force &&
-        (($("page-tools").hidden && !$("takeover-dialog").open) ||
+        (($("page-tools").hidden &&
+          $("page-switch").hidden &&
+          !$("takeover-dialog").open) ||
           Date.now() - catalogAt < 30000))
     )
       return;
@@ -188,6 +224,7 @@ window.Management = (() => {
       loading = false;
       $("catalog-refresh").disabled = false;
       render();
+      renderSwitch();
     }
   }
   async function loadReleases(force = false) {
@@ -638,5 +675,14 @@ window.Management = (() => {
   $("takeover-point").onchange = pointNote;
   render();
   if (location.protocol === "https:") load();
-  return { render, load, queue, openTakeover, selectTab };
+  return {
+    render,
+    load,
+    queue,
+    openTakeover,
+    selectTab,
+    openTasks,
+    preflightObservation,
+    preflightBlocker: (i) => blocker(i, "preflight"),
+  };
 })();

@@ -563,3 +563,116 @@ test('merely viewing runtime versions never submits an upgrade command',async()=
  assert(calls.includes('/api/releases'));assert(!calls.some(x=>x==='/api/command'));
  assert.equal(ctx.document.getElementById('runtime-upgrade').disabled,true,'online owner must first be fenced');
 });
+
+async function switchBrowser(state, tasks = [], catalogError = false) {
+  const calls = [];
+  const c = browser(async (path) => {
+    calls.push(path);
+    if (catalogError) return Response.json({ error: "Storage unavailable" }, { status: 503 });
+    return Response.json({ points: [], tasks });
+  });
+  for (const i of state.instances) {
+    i.agent.management_protocol = 1;
+    i.agent.actions = ["preflight"];
+  }
+  setSnapshot(c, state);
+  vm.runInContext(readFileSync(new URL("../web/management.js", import.meta.url), "utf8"), c);
+  evaluate(c, 'navigate("switch")');
+  await new Promise((r) => setImmediate(r));
+  return { c, calls, card: c.document.querySelector(".target-option") };
+}
+const preflightTask = (state, error = "") => ({
+  request: { id: "task-preflight", target: "node-b", action: "preflight" },
+  state,
+  stage: "check-backup-storage",
+  updated_at: new Date().toISOString(),
+  error,
+});
+
+test("switch cards distinguish missing, expired, changed-epoch and invalid preflight reports", async () => {
+  for (const [pre, label, reason] of [
+    [undefined, "预检未就绪", /尚无预检通过记录/],
+    [{ ready: false }, "预检未就绪", /尚未上报预检通过结果/],
+    [{ ready: true, epoch: 1, checked_at: new Date(Date.now() - 660000).toISOString() }, "预检已过期", /10 分钟/],
+    [{ ready: true, epoch: 0, checked_at: new Date().toISOString() }, "预检已失效", /归属代数已变化/],
+    [{ ready: true, epoch: 1, checked_at: "invalid" }, "预检时间异常", /检查实例时钟/],
+    [{ ready: true, epoch: 1, checked_at: new Date(Date.now() + 600000).toISOString() }, "预检时间异常", /检查实例时钟/],
+  ]) {
+    const state = fixture();
+    state.instances[1].agent.preflight = pre;
+    const { c, card, calls } = await switchBrowser(state);
+    assert.equal(card.querySelector(".badge").textContent, label);
+    assert.match(card.querySelector(".target-reason").textContent, reason);
+    assert.equal(card.querySelector("input").disabled, true);
+    assert.match(card.textContent, /执行切换预检/);
+    assert.match(c.document.getElementById("switch-blocker").textContent, /暂无可切换的目标/);
+    assert.deepEqual(calls, ["/api/catalog?offset=0"], "viewing blockers is read-only");
+  }
+});
+
+test("failed preflight exposes its stage and literal error, and opens the target's task history", async () => {
+  const state = fixture();
+  state.instances[1].agent.preflight = { ready: false };
+  const error = 'insufficient disk space: need 4 GiB, available 1 GiB <script>alert(1)</script>';
+  const { c, card } = await switchBrowser(state, [preflightTask("FAILED", error)]);
+  assert.equal(card.querySelector(".badge").textContent, "预检失败");
+  assert.match(card.querySelector(".target-reason").textContent, /检查备份可读性与容量/);
+  assert.equal(card.querySelector(".target-error").textContent, error);
+  assert.equal(card.querySelector("script"), null);
+  assert.equal(card.querySelector("label button"), null, "actions are outside the radio label");
+  card.querySelector('[data-focus-key="node-b-tasks"]').onclick();
+  assert.equal(c.document.getElementById("page-tools").hidden, false);
+  assert.equal(c.document.getElementById("target").value, "node-b");
+  assert.equal(c.document.getElementById("panel-tasks").hidden, false);
+  assert.match(c.document.getElementById("task-history").textContent, /insufficient disk space/);
+});
+
+test("running preflight shows progress without offering a duplicate preflight", async () => {
+  const state = fixture();
+  state.instances[1].agent.preflight = { ready: false };
+  state.instances[1].agent.active_tasks = [{ id: "task-preflight", action: "preflight", state: "RUNNING", stage: "pull-pinned-images", updated_at: new Date().toISOString() }];
+  const { card } = await switchBrowser(state);
+  assert.equal(card.querySelector(".badge").textContent, "预检进行中");
+  assert.match(card.textContent, /准备固定版本镜像/);
+  assert.equal(card.querySelector('[data-focus-key="node-b-preflight"]'), null);
+  assert.equal(card.querySelector("input").disabled, true);
+});
+
+test("task success alone never unlocks switching, but a new valid report supersedes old errors", async () => {
+  const state = fixture();
+  state.instances[1].agent.preflight = { ready: false };
+  const { c, card } = await switchBrowser(state, [preflightTask("SUCCEEDED")]);
+  assert.equal(card.querySelector(".badge").textContent, "等待预检报告");
+  assert.equal(card.querySelector("input").disabled, true);
+  setSnapshot(c, fixture());
+  assert.equal(c.document.querySelector(".target-option input").disabled, false);
+
+  for (const oldState of ["FAILED", "RUNNING"]) {
+    const old = preflightTask(oldState, "Old failure");
+    old.updated_at = new Date(Date.now() - 60000).toISOString();
+    const current = await switchBrowser(fixture(), [old]);
+    assert.equal(current.card.querySelector(".badge").textContent, "可作为目标");
+    assert.equal(current.card.querySelector("input").disabled, false);
+    assert.equal(current.card.querySelector(".target-error"), null);
+  }
+});
+
+test("unreadable task history is acknowledged without claiming the instance never ran preflight", async () => {
+  const state = fixture();
+  state.instances[1].agent.preflight = { ready: false };
+  const { card } = await switchBrowser(state, [], true);
+  assert.match(card.textContent, /任务记录暂时无法读取/);
+  assert.match(card.textContent, /无法确认具体失败原因/);
+  assert.equal(card.querySelector("input").disabled, true);
+});
+
+test("source or target report failures do not suggest preflight as the remedy", async () => {
+  for (const index of [0, 1]) {
+    const state = fixture();
+    state.instances[index].report_fresh = false;
+    const { card } = await switchBrowser(state);
+    assert.equal(card.querySelector(".badge").textContent, index === 0 ? "源实例未就绪" : "实例报告过期");
+    assert.equal(card.querySelector('[data-focus-key="node-b-preflight"]'), null);
+    assert.equal(card.querySelector("input").disabled, true);
+  }
+});

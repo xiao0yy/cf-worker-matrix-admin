@@ -857,12 +857,20 @@ button .icon {
 }
 .target-option {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   padding: 19px;
   border: 1px solid var(--line);
   border-radius: 10px;
   margin: 0;
+}
+.target-choice {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1 1 220px;
   cursor: pointer;
 }
 .target-option:has(input:checked) {
@@ -873,8 +881,38 @@ button .icon {
   border-color: #b5abdf;
 }
 .target-option:has(input:disabled) {
-  cursor: not-allowed;
   background: #fafafb;
+}
+.target-choice:has(input:disabled) {
+  cursor: not-allowed;
+}
+.target-explanation,
+.target-actions {
+  flex-basis: 100%;
+  min-width: 0;
+  padding-left: 31px;
+}
+.target-explanation p {
+  margin: 0;
+  max-width: 72ch;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.target-explanation p + p {
+  margin-top: 8px;
+}
+.target-hint {
+  color: var(--muted);
+}
+.target-error {
+  color: var(--red);
+  white-space: pre-wrap;
+}
+.target-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
 }
 .target-option input {
   width: 17px;
@@ -1682,6 +1720,13 @@ noscript {
   }
   .target-option > .badge {
     margin-left: 27px;
+  }
+  .target-choice {
+    gap: 10px;
+  }
+  .target-explanation,
+  .target-actions {
+    padding-left: 27px;
   }
   .transfer {
     padding: 17px;

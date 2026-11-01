@@ -637,12 +637,31 @@ function commandBlocker(i) {
   return "";
 }
 function switchBlocker(i) {
+  return switchAvailability(i).reason;
+}
+function switchAvailability(i) {
+  const stop = (label, reason, extra = {}) => ({ label, reason, ...extra });
   const blocked = commandBlocker(i);
-  if (blocked) return blocked;
+  if (blocked) {
+    if (!currentStatus()) return stop("状态待刷新", blocked);
+    if (i && !fresh(i))
+      return stop(
+        "实例报告过期",
+        "目标实例未及时上报状态。请检查实例控制服务，等待报告恢复后再切换。",
+      );
+    if (i && !fresh(i, "agent"))
+      return stop(
+        "轮询报告过期",
+        "目标实例的指令轮询报告已过期。请检查轮询服务，等待恢复后再切换。",
+      );
+    return stop("等待处理", blocked);
+  }
   if (snapshot.capabilities?.planned_handover !== true)
-    return "此集群尚未启用正常交接。";
-  if (snapshot.control.phase !== "ONLINE") return "已有交接正在进行。";
-  if (i.id === snapshot.control.owner) return "这已经是当前服务实例。";
+    return stop("未启用交接", "此集群尚未启用正常交接，请先检查集群配置。");
+  if (snapshot.control.phase !== "ONLINE")
+    return stop("交接进行中", "已有交接正在进行，请先处理或完成当前交接。");
+  if (i.id === snapshot.control.owner)
+    return stop("当前实例", "这已经是当前服务实例。");
   if (
     snapshot.instances.some(
       (node) =>
@@ -652,7 +671,7 @@ function switchBlocker(i) {
           node.report.bound_epoch !== snapshot.control.epoch),
     )
   )
-    return "实例服务报告与归属不一致，请先处理异常。";
+    return stop("归属冲突", "实例服务报告与归属不一致，请先处理异常。");
   const owner = findInstance(snapshot.control.owner);
   if (
     !fresh(owner) ||
@@ -660,17 +679,80 @@ function switchBlocker(i) {
     owner.report.serving !== true ||
     owner.report.bound_epoch !== snapshot.control.epoch
   )
-    return "请先确认源实例正常在线，才能发起正常交接。";
-  const pre = i.agent?.preflight;
-  if (
-    !pre?.ready ||
-    pre.epoch !== snapshot.control.epoch ||
-    Date.now() - Date.parse(pre.checked_at) > 600000
-  )
-    return "先执行切换预检，检查镜像、备份和磁盘空间。";
+    return stop("源实例未就绪", "请先确认源实例正常在线，才能发起正常交接。");
   if (i.report.serving !== false)
-    return "目标实例仍报告正在服务，请先检查归属。";
-  return "";
+    return stop("目标仍在服务", "目标实例仍报告正在服务，请先检查归属。");
+  const pre = i.agent?.preflight;
+  const observation = window.Management?.preflightObservation(i);
+  const task = observation?.task;
+  const checked = Date.parse(pre?.checked_at);
+  // Task history explains failures; only a fresh instance report can allow a
+  // handover. An older failed task must not mask a later successful preflight.
+  const relevant =
+    task &&
+    (!Number.isFinite(checked) || Date.parse(task.updated_at) >= checked);
+  if (
+    task &&
+    ["QUEUED", "RUNNING"].includes(task.state) &&
+    (!pre?.ready || relevant)
+  )
+    return stop("预检进行中", observation.stage + "，完成后将自动更新。", {
+      tasks: true,
+    });
+  if (relevant && ["FAILED", "INTERRUPTED", "CANCELLED"].includes(task.state))
+    return stop(
+      { FAILED: "预检失败", INTERRUPTED: "预检中断", CANCELLED: "预检已取消" }[
+        task.state
+      ],
+      "预检未通过，停在「" + observation.stage + "」。",
+      {
+        error: task.error,
+        hint: "处理后重新执行预检，通过后才能选择此实例。",
+        preflight: true,
+        tasks: true,
+      },
+    );
+  if (!pre?.ready) {
+    if (relevant && task.state === "SUCCEEDED")
+      return stop("等待预检报告", "任务已完成，等待实例上报预检通过结果。", {
+        tasks: true,
+      });
+    return stop(
+      "预检未就绪",
+      pre
+        ? "实例尚未上报预检通过结果，暂不能确认镜像、备份和磁盘空间可用。"
+        : "尚无预检通过记录，需先检查镜像、备份和磁盘空间。",
+      {
+        preflight: true,
+        tasks: true,
+        hint: observation?.unavailable
+          ? "任务记录暂时无法读取，当前无法确认具体失败原因。可刷新页面重试。"
+          : "执行预检后，此处会显示进度或具体失败原因。",
+      },
+    );
+  }
+  if (pre.epoch !== snapshot.control.epoch)
+    return stop(
+      "预检已失效",
+      "集群归属代数已变化，之前的预检结果不再适用。请重新执行预检。",
+      { preflight: true },
+    );
+  const age = Date.now() - checked;
+  if (!Number.isFinite(age) || age < -30000)
+    return stop(
+      "预检时间异常",
+      "无法确认预检结果的有效时间。请检查实例时钟，然后重新执行预检。",
+      { preflight: true },
+    );
+  if (age > 600000)
+    return stop(
+      "预检已过期",
+      "上次预检通过于 " +
+        time(pre.checked_at) +
+        "，已超过 10 分钟有效期。请重新执行预检。",
+      { preflight: true },
+    );
+  return { label: "可作为目标", reason: "" };
 }
 function renderSwitch() {
   const c = snapshot?.control;
@@ -714,15 +796,18 @@ function renderSwitch() {
   );
   const targets = (snapshot?.instances || []).filter((i) => i.id !== c?.owner);
   if (!targets.some((i) => i.id === switchTarget)) switchTarget = "";
-  const rows = targets.map((i) => {
-    const blocked = switchBlocker(i),
-      label = element("label", "target-option");
+  const rows = targets.map((i, index) => {
+    const status = switchAvailability(i),
+      blocked = status.reason,
+      row = element("div", "target-option"),
+      label = element("label", "target-choice");
     const radio = element("input");
     radio.type = "radio";
     radio.name = "switch-target";
     radio.value = i.id;
     radio.checked = switchTarget === i.id;
     radio.disabled = !!blocked;
+    radio.setAttribute("aria-describedby", "switch-reason-" + index);
     radio.dataset.focusKey = i.id;
     radio.onchange = () => {
       switchTarget = i.id;
@@ -733,22 +818,44 @@ function renderSwitch() {
     copy.append(
       element("strong", "", instanceName(i)),
       element("small", "", publicIP(i) || "未登记公网 IP"),
-      element("small", "", blocked || "实例与指令轮询报告有效"),
     );
-    label.append(
-      radio,
-      copy,
-      badge(blocked ? "暂不可切换" : "可作为目标", blocked ? "warn" : "good"),
+    label.append(radio, copy);
+    row.append(label, badge(status.label, blocked ? "warn" : "good"));
+    const explanation = element("div", "target-explanation");
+    explanation.id = "switch-reason-" + index;
+    explanation.append(
+      element(
+        "p",
+        "target-reason",
+        blocked || "预检已通过，实例与指令轮询报告有效。",
+      ),
     );
-    if (blocked && i.agent?.management_protocol === 1) {
-      const prepare = button("执行切换预检", (event) => {
-        event?.preventDefault();
-        window.Management?.queue(i.id, "preflight", {});
-      });
-      prepare.disabled = !!commandBlocker(i);
-      label.append(prepare);
+    if (status.error)
+      explanation.append(element("p", "target-error", status.error));
+    if (status.hint)
+      explanation.append(element("p", "target-hint", status.hint));
+    const controls = element("div", "target-actions");
+    if (status.preflight && window.Management) {
+      const why = window.Management.preflightBlocker(i);
+      if (why) explanation.append(element("p", "target-hint", why));
+      else {
+        const prepare = button("执行切换预检", () =>
+          window.Management.queue(i.id, "preflight", {}),
+        );
+        prepare.dataset.focusKey = i.id + "-preflight";
+        controls.append(prepare);
+      }
     }
-    return label;
+    if (status.tasks && window.Management) {
+      const history = button("查看任务记录", () =>
+        window.Management.openTasks(i.id),
+      );
+      history.dataset.focusKey = i.id + "-tasks";
+      controls.append(history);
+    }
+    row.append(explanation);
+    if (controls.childElementCount) row.append(controls);
+    return row;
   });
   replaceContent(
     $("switch-targets"),
@@ -768,7 +875,9 @@ function renderSwitch() {
     switchTarget
       ? blocked
       : targets.length
-        ? "请选择一台目标实例。"
+        ? targets.some((i) => !switchBlocker(i))
+          ? "请选择一台目标实例。"
+          : "暂无可切换的目标，请先处理实例上方列出的原因。"
         : "准备备用实例不会自动恢复数据或接管服务。",
   );
   $("switch-next").disabled = !!blocked;
