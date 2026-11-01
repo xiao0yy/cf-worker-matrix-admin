@@ -296,18 +296,32 @@ func TestRealResticDatabaseOnlyRoundTrip(t *testing.T) {
 		t.Fatal("no packs to corrupt in isolated repository")
 	}
 	for _, pack := range packs {
+		info, err := os.Stat(pack)
+		must(t, err)
 		data, err := os.ReadFile(pack)
 		must(t, err)
 		if len(data) == 0 {
 			t.Fatal("empty test pack")
 		}
 		data[0] ^= 0xff
+		// Restic makes local packs read-only. Only this isolated fault-injection
+		// fixture needs owner write access; WriteFile's mode does not change an
+		// existing file. Restore the original mode before testing the reader.
+		must(t, os.Chmod(pack, info.Mode().Perm()|0200))
 		must(t, os.WriteFile(pack, data, 0600))
+		must(t, os.Chmod(pack, info.Mode().Perm()))
 	}
 	fresh := t.TempDir()
 	must(t, payload.Unpack(capsule, filepath.Join(fresh, "bundle")))
-	if err = e.downloadData(context.Background(), r, snaps[0].ID, filepath.Join(fresh, "bundle"), fresh); err == nil {
-		t.Fatal("corrupted backup was accepted without a deep scan")
+	err = e.downloadData(context.Background(), r, snaps[0].ID, filepath.Join(fresh, "bundle"), fresh)
+	var failure *commandFailure
+	if !errors.As(err, &failure) || failure.Program != "restic" {
+		t.Fatalf("expected restic to reject corrupted packs, got %v", err)
+	}
+	log, err := os.ReadFile(filepath.Join(e.Host.Root, "logs", failure.Log))
+	must(t, err)
+	if !strings.Contains(string(log), "ciphertext verification failed") {
+		t.Fatalf("restore failed for a reason other than pack corruption: %s", log)
 	}
 }
 
