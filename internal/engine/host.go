@@ -182,7 +182,14 @@ func (e *Engine) docker(ctx context.Context, args ...string) ([]byte, error) {
 	return e.Runner.Run(ctx, Command{Name: e.Host.Docker, Args: args, Combined: len(args) > 0 && args[0] == "logs"})
 }
 func (e *Engine) system(ctx context.Context, args ...string) error {
-	_, err := e.run(ctx, e.Host.Systemctl, args...)
+	command := Command{Name: e.Host.Systemctl, Args: args}
+	if len(args) == 2 && args[0] == "stop" && args[1] == "matrix-control.service" {
+		// ExecStopPost gracefully stops both databases (up to 35 minutes each).
+		// Do not abandon systemctl after the generic five-minute command limit
+		// and restart management while systemd is still stopping its guard.
+		command.Timeout = 75 * time.Minute
+	}
+	_, err := e.Runner.Run(ctx, command)
 	return err
 }
 func (e *Engine) compose(ctx context.Context, project string, args ...string) ([]byte, error) {

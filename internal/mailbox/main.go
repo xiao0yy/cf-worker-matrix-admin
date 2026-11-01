@@ -445,7 +445,7 @@ func hostInfo() map[string]any {
 	return map[string]any{"hostname": hostname, "addresses": addresses}
 }
 func (p *Poller) report(ctx context.Context, err error) error {
-	report := map[string]any{"schema": 1, "mailbox_protocol": protocol, "instance_id": p.cfg.Instance, "cluster_id": p.cfg.Cluster, "reported_at": p.now().UTC().Format(time.RFC3339), "actions": []string{"probe", "handover-request", "handover-resume", "handover-cancel", "fence-local", "resume-local", "source-resume"}, "force_takeover": false, "software": release.Info(), "host": hostInfo()}
+	report := map[string]any{"schema": 1, "mailbox_protocol": protocol, "instance_id": p.cfg.Instance, "cluster_id": p.cfg.Cluster, "reported_at": p.now().UTC().Format(time.RFC3339), "actions": []string{"probe", "handover-request", "handover-resume", "handover-cancel", "fence-local", "resume-local", "source-resume"}, "force_takeover": true, "software": release.Info(), "host": hostInfo()}
 	if err != nil {
 		report["error"] = err.Error()
 	}

@@ -16,6 +16,29 @@ type beforeCommit struct {
 	fail bool
 }
 
+func TestRequestedCommitAcknowledgementSurvivesMissedAbortHistory(t *testing.T) {
+	_, b, s, _, _, _ := pairFixture(t)
+	s.loseNext = true
+	if hcall(b, "request") == nil || b.journal.Target.Phase != "REQUESTING" {
+		t.Fatal("lost request acknowledgement was not reproduced")
+	}
+	// Retry is an observation of the committed request, not another CAS.
+	writes := s.writes
+	if err := hcall(b, "request"); err != nil || s.writes != writes || b.journal.Target.Phase != "REQUESTED" {
+		t.Fatal("committed request was not reconciled", err)
+	}
+	b = restartController(t, b)
+	// Source rolled back while this target was offline; a later rollback
+	// replaced the optional last_aborted receipt in the meantime.
+	s.state.Revision += 4
+	s.state.Phase, s.state.Operation = "ONLINE", json.RawMessage("null")
+	s.state.Aborted = &FinalOperation{ID: "later-abort", Phase: "ABORTED"}
+	b.observe(s.state, nil)
+	if b.journal.Target.Phase != "CANCELLED" || b.journal.Target.MayWrite || gateCode(b) != 403 {
+		t.Fatal("target remained stranded after committed request was closed")
+	}
+}
+
 // Exercise real controller journals, CAS transitions, stop proofs and admission
 // across A -> B -> A. Docker and the backup producer are isolated fixtures.
 func TestRoundTripHandoverUsesNewEpochAndGeneration(t *testing.T) {

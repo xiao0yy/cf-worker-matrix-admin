@@ -67,7 +67,7 @@ func (e *Engine) Upgrade(ctx context.Context, source string, apply bool) (result
 	if err = local.ReadJSON(filepath.Join(cfg.StateDir, "journal.json"), &journal); err != nil {
 		return nil, err
 	}
-	if journal.Cluster != cfg.Cluster || journal.Instance != cfg.Instance || !journal.Blocked || journal.Target != nil && (journal.Target.MayWrite && journal.Target.Phase != "ONLINE" || journal.Target.Phase == "STARTING" || journal.Target.Phase == "COMMITTING") {
+	if journal.Cluster != cfg.Cluster || journal.Instance != cfg.Instance || !journal.Blocked || journal.Target != nil && journal.Target.Phase != "ONLINE" && journal.Target.Phase != "CANCELLED" && journal.Target.Phase != "RETIRED" {
 		return nil, errors.New("upgrade requires a fenced instance outside STARTING; preserve identity/data")
 	}
 	root := journal.Deployment

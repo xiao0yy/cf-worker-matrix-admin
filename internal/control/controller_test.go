@@ -7,10 +7,30 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestAuthorityRecoveryDoesNotEraseServiceFailure(t *testing.T) {
+	c, a, _, _ := fixture(t)
+	c.observe(a.state, nil)
+	c.jobError(errors.New("bridge failed to start"))
+	c.observe(State{}, errors.New("R2 unavailable"))
+	err := c.snapshot()["error"].(string)
+	if !strings.Contains(err, "bridge failed to start") || !strings.Contains(err, "R2 unavailable") {
+		t.Fatal("lost an independent failure", err)
+	}
+	c.observe(a.state, nil)
+	if c.snapshot()["error"] != "bridge failed to start" || gateCode(c) != 403 {
+		t.Fatal("authority read erased service failure or admitted unhealthy service")
+	}
+	c.runServices()
+	if c.snapshot()["error"] != "" || gateCode(c) != 204 {
+		t.Fatal("successful service recovery did not clear the error")
+	}
+}
 
 type fakeAuthority struct {
 	mu    sync.Mutex

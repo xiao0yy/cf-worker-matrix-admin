@@ -92,6 +92,7 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 		}
 		if j.Target != nil && j.Target.ID == id && j.Target.Epoch == epoch {
 			if operationMatches(s.Operation, j.Target.FinalOperation) || (s.Phase == "ONLINE" && s.Owner == instance && s.Epoch == j.Target.NextEpoch && s.Completed != nil && s.Completed.ID == id) {
+				c.observe(s, nil)
 				return nil
 			}
 			if j.Target.Phase != "REQUESTING" {

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Installed struct {
@@ -18,6 +20,17 @@ type Installed struct {
 	Directory string `json:"directory"`
 	Version   string `json:"version"`
 	Commit    string `json:"commit"`
+}
+
+// Saved before publishing any host configuration. An interrupted prepare must
+// resume the same identity and fixed configuration, never generate a new node.
+type Preparation struct {
+	Schema  int               `json:"schema"`
+	Phase   string            `json:"phase"`
+	Host    Host              `json:"host"`
+	Runtime Installed         `json:"runtime"`
+	Config  control.Config    `json:"config"`
+	Nginx   map[string]string `json:"nginx"`
 }
 
 func (e *Engine) Doctor(ctx context.Context) (any, error) {
@@ -29,6 +42,14 @@ func (e *Engine) Doctor(ctx context.Context) (any, error) {
 	}
 	_, dockerErr := e.docker(ctx, "info")
 	deps["docker_daemon"] = map[string]any{"ready": dockerErr == nil}
+	var preparation Preparation
+	if err := local.ReadJSON(filepath.Join(e.Host.Root, "agent/pending-prepare.json"), &preparation); err == nil {
+		report["phase"] = "PREPARING"
+		report["preparation"] = map[string]any{"phase": preparation.Phase, "instance_id": preparation.Config.Instance, "version": preparation.Runtime.Version}
+		return report, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	if s, err := e.status(ctx); err == nil {
 		report["instance"] = s
 	} else if _, err := os.Stat(e.controlConfig()); err == nil {
@@ -158,9 +179,6 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 	if _, err := release.Current(e.ReleaseDir); err != nil {
 		return err
 	}
-	if err := e.prerequisites(ctx); err != nil {
-		return err
-	}
 	if err := e.connect(); err != nil {
 		return err
 	}
@@ -169,6 +187,19 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 		return err
 	}
 	defer unlock()
+	pending := filepath.Join(e.Host.Root, "agent/pending-prepare.json")
+	var plan Preparation
+	if err = local.ReadJSON(pending, &plan); err == nil {
+		if preflight {
+			return errors.New("standby preparation is incomplete; rerun prepare to resume the same instance")
+		}
+		return e.finishPreparation(ctx, plan)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := e.prerequisites(ctx); err != nil {
+		return err
+	}
 	if _, err = os.Stat(e.controlConfig()); err == nil {
 		s, err := e.status(ctx)
 		if err != nil {
@@ -178,6 +209,8 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 			return errors.New("existing instance belongs to another cluster")
 		}
 		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	entries, err := os.ReadDir(e.Host.Root)
 	if err != nil {
@@ -198,6 +231,11 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 			return errors.New("existing nginx Matrix configuration requires inspection")
 		}
 	}
+	for name := range e.units(Installed{}) {
+		if _, err = os.Lstat(filepath.Join(e.Host.SystemdDirectory, name)); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("existing Matrix systemd unit requires inspection")
+		}
+	}
 	if preflight {
 		return nil
 	}
@@ -209,6 +247,7 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(work)
 	bundle, _, err := e.configuration(ctx, point, work)
 	if err != nil {
 		return err
@@ -245,10 +284,65 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 	cfg.Generations = filepath.Join(e.Host.Root, "generations")
 	cfg.Services[0].DataPath = filepath.Join(e.Host.Root, "deploy/tuwunel/data")
 	cfg.Services[1].DataPath = filepath.Join(e.Host.Root, "deploy/telegram/data")
+	plan = Preparation{Schema: 1, Phase: "INSTALLING", Host: e.Host, Runtime: installed, Config: cfg, Nginx: map[string]string{}}
+	for _, n := range []string{"matrix.conf", "00-matrix-common.conf"} {
+		b, err := os.ReadFile(filepath.Join(bundle, "payload/nginx", n))
+		if err != nil {
+			return err
+		}
+		plan.Nginx[n] = strings.ReplaceAll(string(b), sourceControl, base)
+	}
+	if err = local.JSON(pending, plan); err != nil {
+		return err
+	}
+	return e.finishPreparation(ctx, plan)
+}
+
+// Only create missing files or reuse byte-identical ones. If a person or another
+// operation changed a partial installation, preserve it and report the path.
+func prepareFile(path string, data []byte, mode os.FileMode) error {
+	if err := local.SafePath(path); err != nil {
+		return err
+	}
+	b, err := os.ReadFile(path)
+	if err == nil {
+		if !bytes.Equal(b, data) {
+			return fmt.Errorf("preparation file changed; inspect %s before retry", path)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return local.Atomic(path, data, mode)
+}
+
+func (e *Engine) finishPreparation(ctx context.Context, p Preparation) error {
+	if p.Schema != 1 || p.Host != e.Host || p.Config.Cluster != e.Cluster || !local.SafeID(p.Config.Instance) ||
+		(p.Phase != "INSTALLING" && p.Phase != "READY") || p.Config.StateDir != filepath.Join(e.Host.Root, "deploy/control/state") {
+		return errors.New("preparation identity or host changed; preserve the pending installation")
+	}
+	installed, err := e.installRuntime(e.ReleaseDir)
+	if err != nil {
+		return err
+	}
+	if installed != p.Runtime {
+		return errors.New("resume preparation with the same runtime version")
+	}
+	pending := filepath.Join(e.Host.Root, "agent/pending-prepare.json")
+	if p.Phase == "READY" {
+		// Timers may already have accepted work. Do not rewrite the journal,
+		// units or instance config after reaching this durable boundary.
+		if err = e.system(ctx, "enable", "--now", "matrix-mailbox.timer", "matrix-handover.timer", "matrix-tasks.timer"); err != nil {
+			return err
+		}
+		return os.Rename(pending, filepath.Join(e.Host.Root, "agent/preparation.json"))
+	}
+	cfg := p.Config
 	if err = os.MkdirAll(cfg.Generations, 0700); err != nil {
 		return err
 	}
-	if err = local.JSON(e.controlConfig(), cfg); err != nil {
+	if err = prepareFile(e.controlConfig(), release.JSON(cfg), 0600); err != nil {
 		return err
 	}
 	input, err := local.Private(filepath.Join(e.Host.Root, "config/s3.env"))
@@ -258,38 +352,53 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 	if err = local.Atomic(cfg.S3Config, input, 0600); err != nil {
 		return err
 	}
+	// Host configuration may have been supplied by the operator with different
+	// formatting. Compare its decoded value above, then preserve it.
 	if err = local.JSON(filepath.Join(e.Host.Root, "agent/host.json"), e.Host); err != nil {
 		return err
 	}
-	if err = local.JSON(filepath.Join(e.Host.Root, "agent/runtime.json"), installed); err != nil {
+	if err = prepareFile(filepath.Join(e.Host.Root, "agent/runtime.json"), release.JSON(installed), 0600); err != nil {
 		return err
 	}
-	if err = control.Run([]string{"prepare-standby", "--config", e.controlConfig(), "--expected-instance", cfg.Instance}); err != nil {
-		return err
-	}
-	if err = local.JSON(filepath.Join(base, "managed"), map[string]any{"schema": 1, "standby": true}); err != nil {
-		return err
-	}
-	for p, text := range map[string]string{"nginx-server/guard.conf": control.NginxServer, "nginx-location/guard.conf": control.NginxLocation} {
-		if err = local.Atomic(filepath.Join(base, p), []byte(text), 0600); err != nil {
-			return err
-		}
-	}
-	for _, n := range []string{"matrix.conf", "00-matrix-common.conf"} {
-		b, err := os.ReadFile(filepath.Join(bundle, "payload/nginx", n))
+	journalPath := filepath.Join(cfg.StateDir, "journal.json")
+	var j control.Journal
+	if err = local.ReadJSON(journalPath, &j); errors.Is(err, os.ErrNotExist) {
+		_, err = e.run(ctx, filepath.Join(installed.Directory, "matrix-admin"), "control", "prepare-standby", "--config", e.controlConfig(), "--expected-instance", cfg.Instance)
 		if err != nil {
 			return err
 		}
-		b = []byte(strings.ReplaceAll(string(b), sourceControl, base))
-		if err = local.Atomic(filepath.Join(e.Host.Root, "deploy/nginx", n), b, 0600); err != nil {
-			return err
-		}
-		if err = local.Atomic(filepath.Join(e.Host.NginxDirectory, n), b, 0644); err != nil {
+		err = local.ReadJSON(journalPath, &j)
+	}
+	if err != nil {
+		return err
+	}
+	if j.Schema != 1 || j.Instance != cfg.Instance || j.Cluster != cfg.Cluster || !j.Blocked || j.BoundEpoch != 0 || j.Final != nil || j.Target != nil || j.Deployment != "" || len(j.Services) != 0 {
+		return errors.New("partial standby already has bound data or operations; initialization will not reset it")
+	}
+	base := filepath.Dir(e.controlConfig())
+	if err = prepareFile(filepath.Join(base, "managed"), release.JSON(map[string]any{"schema": 1, "standby": true}), 0600); err != nil {
+		return err
+	}
+	for path, text := range map[string]string{"nginx-server/guard.conf": control.NginxServer, "nginx-location/guard.conf": control.NginxLocation} {
+		if err = prepareFile(filepath.Join(base, path), []byte(text), 0600); err != nil {
 			return err
 		}
 	}
-	if err = e.writeUnits(installed); err != nil {
-		return err
+	for _, name := range []string{"matrix.conf", "00-matrix-common.conf"} {
+		text, ok := p.Nginx[name]
+		if !ok || text == "" {
+			return errors.New("incomplete preparation nginx configuration")
+		}
+		for path, mode := range map[string]os.FileMode{filepath.Join(e.Host.Root, "deploy/nginx", name): 0600, filepath.Join(e.Host.NginxDirectory, name): 0644} {
+			if err = prepareFile(path, []byte(text), mode); err != nil {
+				return err
+			}
+		}
+	}
+	for name, text := range e.units(installed) {
+		if err = prepareFile(filepath.Join(e.Host.SystemdDirectory, name), []byte(text), 0644); err != nil {
+			return err
+		}
 	}
 	if _, err = e.run(ctx, e.Host.Nginx, "-c", e.Host.NginxConfig, "-t"); err != nil {
 		return err
@@ -297,11 +406,27 @@ func (e *Engine) Prepare(ctx context.Context, preflight bool) error {
 	if err = e.system(ctx, "daemon-reload"); err != nil {
 		return err
 	}
-	if err = e.system(ctx, "enable", "--now", "matrix-control.service", "matrix-mailbox.timer", "matrix-handover.timer", "matrix-tasks.timer"); err != nil {
+	if err = e.system(ctx, "enable", "--now", "matrix-control.service"); err != nil {
 		return err
 	}
 	if err = e.system(ctx, "reload", e.Host.NginxService); err != nil {
 		return err
 	}
-	return nil
+	if err = e.wait(ctx, 30*time.Second, func() error {
+		s, err := e.status(ctx)
+		if err != nil {
+			return err
+		}
+		if s.Instance != cfg.Instance || s.Cluster != cfg.Cluster || !s.Blocked || s.Serving || s.Epoch != 0 {
+			return errors.New("prepared controller is not an empty fenced standby")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	p.Phase = "READY"
+	if err = local.JSON(pending, p); err != nil {
+		return err
+	}
+	return e.finishPreparation(ctx, p)
 }

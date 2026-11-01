@@ -24,7 +24,7 @@ func Run(args []string) error {
 	}
 	cmd := args[0]
 	if cmd == "capabilities" {
-		fmt.Println(`{"schema":1,"planned_handover":true,"force_takeover":false,"recovery_protocol":2}`)
+		fmt.Println(`{"schema":1,"planned_handover":true,"force_takeover":true,"recovery_protocol":2}`)
 		return nil
 	}
 	flags := flag.NewFlagSet(cmd, flag.ContinueOnError)

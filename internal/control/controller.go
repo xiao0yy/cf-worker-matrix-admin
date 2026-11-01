@@ -16,21 +16,23 @@ import (
 )
 
 type Controller struct {
-	cfg         Config
-	store       Authority
-	docker      Containers
-	mu          sync.Mutex
-	finalMu     sync.Mutex
-	authorityMu sync.Mutex
-	journal     Journal
-	state       *State
-	deadline    time.Time
-	ready       bool
-	lastError   string
-	action      string
-	busy        bool
-	wake        chan struct{}
-	now         func() time.Time
+	cfg          Config
+	store        Authority
+	docker       Containers
+	mu           sync.Mutex
+	finalMu      sync.Mutex
+	authorityMu  sync.Mutex
+	journal      Journal
+	state        *State
+	deadline     time.Time
+	ready        bool
+	lastError    string
+	serviceError string
+	stopError    string
+	action       string
+	busy         bool
+	wake         chan struct{}
+	now          func() time.Time
 }
 
 func (c *Controller) saveLocked() error {
@@ -84,6 +86,13 @@ func (c *Controller) observe(s State, err error) {
 	c.state = &s
 	c.journal.HighEpoch = s.Epoch
 	c.journal.HighRevision = s.Revision
+	// A PUT acknowledgement can be lost after R2 committed REQUESTED. Record
+	// that observation before later rollback receipts move out of the window.
+	if t := c.journal.Target; t != nil && t.Phase == "REQUESTING" && operationMatches(s.Operation, t.FinalOperation) {
+		copy := *t
+		copy.Phase = "REQUESTED"
+		c.journal.Target = &copy
+	}
 	// A rollback closes both participants. This is an authority receipt, not an
 	// inference from a healthy source or from a missing operation.
 	if t := c.journal.Target; t != nil && !t.MayWrite && s.Aborted != nil &&
@@ -158,7 +167,22 @@ func (c *Controller) freshGrant(ctx context.Context) error {
 func (c *Controller) snapshot() map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return map[string]any{"schema": 1, "cluster_id": c.cfg.Cluster, "instance_id": c.cfg.Instance, "bound_epoch": c.journal.BoundEpoch, "blocked": c.journal.Blocked, "reason": c.journal.Reason, "control": c.state, "final_backup": c.journal.Final, "handover": c.journal.Target, "deployment_root": c.journal.Deployment, "serving": c.allowedLocked(), "ready": c.ready, "action": c.action, "error": c.lastError, "reported_at": c.now().UTC().Format(time.RFC3339), "planned_handover_implemented": true, "forced_takeover_implemented": false, "automatic_cleanup_implemented": false}
+	// Authority reads and service reconciliation are independent. A successful
+	// poll must not hide a failed start/stop while the services are still broken.
+	err := c.serviceError
+	if c.stopError != "" {
+		if err != "" {
+			err += "; "
+		}
+		err += c.stopError
+	}
+	if c.lastError != "" {
+		if err != "" {
+			err += "; "
+		}
+		err += c.lastError
+	}
+	return map[string]any{"schema": 1, "cluster_id": c.cfg.Cluster, "instance_id": c.cfg.Instance, "bound_epoch": c.journal.BoundEpoch, "blocked": c.journal.Blocked, "reason": c.journal.Reason, "control": c.state, "final_backup": c.journal.Final, "handover": c.journal.Target, "deployment_root": c.journal.Deployment, "serving": c.allowedLocked(), "ready": c.ready, "action": c.action, "error": err, "reported_at": c.now().UTC().Format(time.RFC3339), "planned_handover_implemented": true, "forced_takeover_implemented": true, "automatic_cleanup_implemented": false}
 }
 func (c *Controller) fence(reason string) error {
 	c.mu.Lock()
@@ -264,13 +288,15 @@ func (c *Controller) runServices() {
 	c.mu.Lock()
 	if c.processGrantLocked() {
 		c.ready = true
+		c.serviceError = ""
+		c.stopError = ""
 	}
 	c.mu.Unlock()
 }
 func (c *Controller) jobError(err error) {
 	c.mu.Lock()
 	c.ready = false
-	c.lastError = err.Error()
+	c.serviceError = err.Error()
 	c.mu.Unlock()
 	log.Printf("service reconciliation: %s", err)
 }
@@ -322,7 +348,9 @@ func (c *Controller) schedule(fresh bool) {
 			c.busy = false
 			c.action = ""
 			if err != nil {
-				c.lastError = err.Error()
+				c.stopError = err.Error()
+			} else {
+				c.stopError = ""
 			}
 			c.mu.Unlock()
 		}()

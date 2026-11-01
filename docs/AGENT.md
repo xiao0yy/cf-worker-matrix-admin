@@ -6,7 +6,7 @@
 
 ## 先检查，再安装
 
-1. 默认根目录 `/opt/matrix`。先查看 `agent/runtime.json`、
+1. 默认根目录 `/opt/matrix`。先查看 `agent/pending-prepare.json`、`agent/runtime.json`、
    `deploy/control/local.json`、`deploy/control/state/journal.json`。
    有实例记录就保留其身份、epoch、数据和未完成操作；不得重新初始化。
 2. Agent 自行检查 Linux amd64、systemd、Docker Engine 与 Compose 插件、
@@ -65,6 +65,11 @@
 到 `releases/X.Y.Z`，保存随机实例 ID，准备 nginx 守卫、controller 和轮询任务。
 **不会下载 B2 数据、启动业务容器或开启备份任务。** 不需要用户提供 SSH。
 
+若 `agent/pending-prepare.json` 存在，说明首次准备尚未完成：使用其中记录的同一
+运行包和本机路径重跑 `prepare`，续完原实例，不运行第二次身份初始化。
+`doctor` 会显示 PREPARING。修复报告的依赖问题后重试，不删除 journal 或 pending 文件。
+配置内容被改动、实例已有数据绑定时会停止并指出原因，不能通过清空目录强行绕过。
+
 把实例 ID、主机显示名与管理界面中的实例对应起来。常规切换由用户在管理界面
 显式发起；旧实例冻结写入并完成最终备份后，新实例才恢复、验证、接管。
 `matrix-admin handover` 与 systemd 定时器使用相同逻辑。
@@ -95,7 +100,8 @@ CLI 的 `control`、`mailbox`、`tasks` 是同一个程序的内部 systemd 入�
 
 先验证完整新运行包。显式 fence，确认 blocked、不再 serving，且无进行中的
 交接/最终备份，再用**新包里的程序**执行 upgrade --apply。
-成功后读取 status，确认原实例 ID、epoch 与目录保留，再显式 resume。
+成功后读取 status，确认原实例 ID、epoch 与目录保留。只有当前 owner 才显式 resume；
+standby 和 RETIRED 旧机升级后保持停用，等待用户发起新的交接，不执行 resume。
 中断时保留 `agent/pending-update.json`，用同一新版本重试；不要重建身份、
 手改 journal 或回滚已经可能写入的数据。旧运行目录保留供诊断，units 只引用
 一个生效版本。0.1.x 的旧脚本不再被新 units 调用。

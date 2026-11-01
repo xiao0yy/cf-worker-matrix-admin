@@ -471,6 +471,9 @@ func TestUpgradeResumesAfterGuardStartFailureWithoutNewIdentity(t *testing.T) {
 	e.Runner = runFunc(func(_ context.Context, c Command) ([]byte, error) {
 		args := strings.Join(c.Args, " ")
 		calls = append(calls, args)
+		if args == "stop matrix-control.service" && c.Timeout < 75*time.Minute {
+			t.Fatal("upgrade did not allow the guard's graceful stop budget")
+		}
 		if args == "is-active --quiet matrix-backup.timer" {
 			return nil, errors.New("inactive")
 		}
@@ -571,6 +574,35 @@ func TestUpgradeRetryAfterReloadFailurePreservesDataBinding(t *testing.T) {
 				t.Fatal("journal or generation overwritten")
 			}
 		})
+	}
+}
+
+func TestFormerWriterCanUpgradeAfterRetirementButNotDuringStart(t *testing.T) {
+	e := testEngine(t)
+	e.Host.SystemdDirectory = t.TempDir()
+	source := runtimeFixture(t, "0.3.0")
+	s := Status{Cluster: e.Cluster, Instance: "node-a", Epoch: 2, Blocked: true, Control: &control.State{Owner: "node-b", Epoch: 3, Phase: "ONLINE"}, Final: &control.FinalOperation{Phase: "RETIRED"}}
+	cfg := fakeController(t, e, &s, nil)
+	j := control.Journal{Schema: 1, Cluster: e.Cluster, Instance: s.Instance, BoundEpoch: 2, HighEpoch: 3, HighRevision: 20, Blocked: true,
+		Final: s.Final, Target: &control.TargetOperation{FinalOperation: control.FinalOperation{Phase: "RETIRED", NextEpoch: 2}, MayWrite: true}}
+	path := filepath.Join(cfg.StateDir, "journal.json")
+	must(t, local.JSON(path, j))
+	before, err := local.FileHash(path)
+	must(t, err)
+	e.Runner = runFunc(func(context.Context, Command) ([]byte, error) { return nil, nil })
+	_, err = e.Upgrade(context.Background(), source, true)
+	must(t, err)
+	after, err := local.FileHash(path)
+	must(t, err)
+	if before != after {
+		t.Fatal("upgrade rewrote retired data binding")
+	}
+	for _, phase := range []string{"STARTING", "COMMITTING", "RESTORING", "REQUESTING"} {
+		j.Target.Phase = phase
+		must(t, local.JSON(path, j))
+		if _, err := e.Upgrade(context.Background(), source, true); err == nil {
+			t.Fatal("upgrade crossed an unfinished transition", phase)
+		}
 	}
 }
 func TestPreparePreflightDoesNotContactB2OrCreateIdentity(t *testing.T) {
