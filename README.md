@@ -7,7 +7,7 @@
 - Tuwunel：在线 RocksDB checkpoint，restic 去重上传 B2。
 - Telegram 桥：SQLite backup API，包含已提交 WAL、登录状态和加密状态。
 - R2：配置、恢复索引、实例状态与交接；媒体保留在原生 S3，不重复备份。
-- 切换：停止写者、增量最终备份；目标恢复并通过内容与隔离启动校验后上线。
+- 切换：停止写者、增量最终备份；目标恢复完成后启动服务，通过健康检查再上线。
 - 失败：保存操作日志与数据，不以超时判定旧实例死亡，不自动覆盖已开始写入的数据。
 
 服务器部署直接使用 [Release](https://github.com/xiao0yy/cf-worker-matrix-admin/releases)

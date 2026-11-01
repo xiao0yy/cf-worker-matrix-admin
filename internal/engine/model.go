@@ -21,7 +21,7 @@ type Telegram struct {
 	Finished  string           `json:"finished_at"`
 	Image     string           `json:"image_id"`
 	Network   Network          `json:"network"`
-	Counts    map[string]int64 `json:"state_counts"`
+	Counts    map[string]int64 `json:"state_counts,omitempty"`
 	Restarted bool             `json:"source_service_restarted"`
 	Excluded  []string         `json:"excluded_paths"`
 }

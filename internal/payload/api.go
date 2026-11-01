@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -36,7 +37,7 @@ func Verify(bundle string) error {
 }
 
 // VerifyManifest validates a manifest computed from this private frozen payload.
-// Source callers may reuse immutable SST hashes; untrusted restores use Verify.
+// Explicit drills use Verify; normal restores rely on restic for data integrity.
 func VerifyManifest(bundle, actual string) error {
 	b, e := local.ReadFile(filepath.Join(bundle, "manifest.sha256"), 4<<20)
 	if e != nil {
@@ -49,6 +50,61 @@ func VerifyManifest(bundle, actual string) error {
 	if actual != string(b) {
 		return errors.New("payload inventory or content mismatch")
 	}
+	return requiredFiles(entries)
+}
+
+// VerifyInventory checks staging identity and bounded configuration contents.
+// Database hashes were recorded when staging froze the files; reading them again
+// here would duplicate the backup producer's work on every upload or retry.
+func VerifyInventory(bundle string) error {
+	b, err := local.ReadFile(filepath.Join(bundle, "manifest.sha256"), 4<<20)
+	if err != nil {
+		return err
+	}
+	entries, err := manifestEntries(string(b))
+	if err != nil {
+		return err
+	}
+	if err = requiredFiles(entries); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	root := filepath.Join(bundle, "payload")
+	if err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() || entries[name] == "" {
+			return errors.New("unexpected staged payload file")
+		}
+		if !dataPath(name) {
+			content, err := boundedFile(path, 8<<20)
+			if err != nil {
+				return err
+			}
+			if fileHash(content) != entries[name] {
+				return errors.New("staged configuration content mismatch")
+			}
+		}
+		seen[name] = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	if len(seen) != len(entries) {
+		return errors.New("staged payload file missing")
+	}
+	return nil
+}
+
+func requiredFiles(entries map[string]string) error {
 	for _, name := range []string{"database/CURRENT", "telegram/data/telegram.db", "telegram/metadata.json", "config/docker-compose.yml", "config/s3/media.env", "control/source-local.json", "nginx/matrix.conf", "nginx/00-matrix-common.conf"} {
 		if entries[name] == "" {
 			return errors.New("required recovery file missing: " + name)

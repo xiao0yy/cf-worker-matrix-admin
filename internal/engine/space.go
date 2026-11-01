@@ -42,12 +42,12 @@ func treeSize(path string) (uint64, error) {
 	return size, err
 }
 
-// Large SST files are linked through download, bundle, probe and generation.
-// Reserve one database, one copy of mutable probe files, and working headroom.
+// A normal restore needs one database plus working headroom. Only an explicit
+// drill creates probe copies of mutable files (SSTs remain hard linked).
 func (e *Engine) snapshotSpace(ctx context.Context, repo Repository, snapshot string) (uint64, error) {
-	return e.snapshotSpaceWithCache(ctx, repo, snapshot, "")
+	return e.snapshotSpaceWithCache(ctx, repo, snapshot, "", false)
 }
-func (e *Engine) snapshotSpaceWithCache(ctx context.Context, repo Repository, snapshot, cache string) (uint64, error) {
+func (e *Engine) snapshotSpaceWithCache(ctx context.Context, repo Repository, snapshot, cache string, deep bool) (uint64, error) {
 	stats, err := e.rest(ctx, repo, "", "stats", snapshot, "--mode", "restore-size", "--json")
 	if err != nil {
 		return 0, err
@@ -75,7 +75,10 @@ func (e *Engine) snapshotSpaceWithCache(ctx context.Context, repo Repository, sn
 	if total != size.Bytes {
 		return 0, errors.New("snapshot inventory and restore size differ")
 	}
-	need := total + mutable + (1 << 30)
+	need := total + (1 << 30)
+	if deep {
+		need += mutable
+	}
 	remaining := need
 	if cache != "" {
 		allocated, err := allocatedSize(cache)

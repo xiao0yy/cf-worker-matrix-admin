@@ -41,6 +41,11 @@ func (e *Engine) counts(ctx context.Context, db string) (map[string]int64, error
 	return m, nil
 }
 func (e *Engine) verifyTelegram(ctx context.Context, db string, m Telegram) error {
+	// Full database scans are diagnostics for explicit drills, not a backup or
+	// handover readiness requirement. Old snapshots may carry comparison counts.
+	if m.Schema != 1 || (m.Method != "sqlite-online-backup" && m.Method != "sqlite-cold-backup") {
+		return errors.New("unsupported Telegram snapshot metadata")
+	}
 	if st, err := os.Lstat(db); err != nil || !st.Mode().IsRegular() || st.Size() == 0 {
 		return errors.New("missing regular Telegram database")
 	}
@@ -57,12 +62,14 @@ func (e *Engine) verifyTelegram(ctx context.Context, db string, m Telegram) erro
 			return errors.New("Telegram SQLite integrity check failed")
 		}
 	}
-	counts, err := e.counts(ctx, db)
-	if err != nil {
-		return err
-	}
-	if m.Schema != 1 || (m.Method != "sqlite-online-backup" && m.Method != "sqlite-cold-backup") || !reflect.DeepEqual(counts, m.Counts) {
-		return errors.New("Telegram account/crypto state counts differ")
+	if len(m.Counts) != 0 {
+		counts, err := e.counts(ctx, db)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(counts, m.Counts) {
+			return errors.New("Telegram account/crypto state counts differ")
+		}
 	}
 	return nil
 }
@@ -181,17 +188,10 @@ func (e *Engine) telegramSnapshot(ctx context.Context, project, dest string, col
 	if netErr != nil || !local.SafeID(network.Name) || !subnet.Contains(net.ParseIP(network.Address)) || !subnet.Contains(net.ParseIP(network.Gateway)) {
 		return m, errors.New("invalid bridge network addressing")
 	}
-	counts, err := e.counts(ctx, db)
-	if err != nil {
-		return m, err
-	}
 	method := "sqlite-online-backup"
 	if cold {
 		method = "sqlite-cold-backup"
 	}
-	m = Telegram{Schema: 1, Method: method, Started: started, Finished: e.stamp(), Image: before.Image, Network: network, Counts: counts, Excluded: []string{"data/tmp", "data/telegram.db-wal", "data/telegram.db-shm"}}
-	if err = e.verifyTelegram(ctx, db, m); err != nil {
-		return m, err
-	}
+	m = Telegram{Schema: 1, Method: method, Started: started, Finished: e.stamp(), Image: before.Image, Network: network, Excluded: []string{"data/tmp", "data/telegram.db-wal", "data/telegram.db-shm"}}
 	return m, local.JSON(filepath.Join(dest, "metadata.json"), m)
 }

@@ -169,11 +169,11 @@ func (e *Engine) downloadData(ctx context.Context, r Repository, snapshot, bundl
 	if err := local.SafePath(download); err != nil {
 		return err
 	}
-	if _, err := e.rest(ctx, r, "", "restore", snapshot, "--target", download, "--overwrite", "always", "--verify"); err != nil {
+	// Restic authenticates restored blocks and repairs partial files on retry.
+	// --verify would add a separate full read of the restored files. Deep reads
+	// belong to an explicit restore drill, never the normal handover path.
+	if _, err := e.rest(ctx, r, "", "restore", snapshot, "--target", download, "--overwrite", "always"); err != nil {
 		return err
 	}
-	if err := payload.Merge(download, bundle); err != nil {
-		return err
-	}
-	return payload.Verify(bundle)
+	return payload.Merge(download, bundle)
 }

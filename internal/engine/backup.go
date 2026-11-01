@@ -116,11 +116,9 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 	if _, err = e.permit(ctx, op, &meta.Binding); err != nil {
 		return err
 	}
-	manifest, err := local.ManifestCached(ctx, filepath.Join(bundle, "payload"), filepath.Join(state, "sst-hashes.json"))
-	if err != nil {
-		return err
-	}
-	if err = payload.VerifyManifest(bundle, manifest); err != nil {
+	// Stage already recorded the frozen data manifest. Do not hash SQLite and
+	// mutable RocksDB files a second time just to begin the upload.
+	if err = payload.VerifyInventory(bundle); err != nil {
 		return err
 	}
 	jobfile := filepath.Join(pending, "job.json")
@@ -227,6 +225,9 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 				return err
 			}
 			if err = e.downloadData(ctx, job.Repository, job.Snapshot, filepath.Join(verify, "bundle"), verify); err != nil {
+				return err
+			}
+			if err = payload.Verify(filepath.Join(verify, "bundle")); err != nil {
 				return err
 			}
 			if err = e.verifyTelegram(ctx, filepath.Join(verify, "bundle/payload/telegram/data/telegram.db"), meta.Telegram); err != nil {

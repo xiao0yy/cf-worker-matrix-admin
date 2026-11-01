@@ -9,7 +9,7 @@ const actions = {
   probe: ["检查指令通路", "只检查管理指令能否到达实例，不启停业务。"],
   "handover-request": [
     "切换实例",
-    "旧实例停写并完成最终备份后，新实例恢复、校验并接管服务。",
+    "旧实例停写并完成最终备份后，新实例恢复数据、启动并接管服务。",
   ],
   "handover-resume": [
     "继续目标实例切换",
@@ -67,7 +67,7 @@ const phaseNames = {
   SNAPSHOTTING: "正在生成最终备份",
   RELEASED: "已释放归属",
   RESTORING: "正在恢复数据",
-  VALIDATING: "正在校验数据",
+  VALIDATING: "等待恢复就绪",
   STARTING: "正在启动服务",
 };
 const receiptNames = {
@@ -331,7 +331,7 @@ function backupVerification(b) {
     b.database_startup_verified === true
   )
     return "恢复及启动校验已通过";
-  if (b?.verification === "database-tree") return "数据库文件校验已通过";
+  if (b?.verification === "database-tree") return "快照文件清单已核对";
   if (b?.verification === "full-restore")
     return "恢复校验已通过，启动校验未确认";
   return "校验结果待确认";

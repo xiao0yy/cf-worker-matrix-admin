@@ -29,6 +29,8 @@ window.Management = (() => {
     "checkpoint-and-upload": "制作并上传数据库备份",
     "read-recovery-point": "读取恢复点",
     "download-and-verify-databases": "下载并校验数据库",
+    "download-databases": "恢复数据库文件",
+    "deep-data-check": "执行完整数据检查（恢复演练）",
     "isolated-database-startup": "隔离启动验证",
     "download-runtime": "下载并校验版本",
     "install-runtime": "安装运行程序",

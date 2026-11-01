@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/payload"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
 	"os"
 	"path/filepath"
@@ -28,12 +29,10 @@ func (e *Engine) Restore(ctx context.Context, snapshot, hash string) (Restored, 
 		return Restored{}, err
 	}
 	defer unlock()
-	return e.restore(ctx, snapshot, hash)
+	// The public restore command is an explicit, isolated recovery drill.
+	return e.restoreAt(ctx, snapshot, hash, "", true)
 }
-func (e *Engine) restore(ctx context.Context, snapshot, hash string) (Restored, error) {
-	return e.restoreAt(ctx, snapshot, hash, "")
-}
-func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Restored, error) {
+func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string, deep bool) (Restored, error) {
 	var result Restored
 	if _, err := release.Current(e.ReleaseDir); err != nil {
 		return result, err
@@ -139,21 +138,32 @@ func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Re
 	if err = e.verifyRepository(ctx, repo); err != nil {
 		return result, err
 	}
-	if _, err = e.snapshotSpaceWithCache(ctx, repo, point.Snapshot, filepath.Join(work, "download")); err != nil {
+	if _, err = e.snapshotSpaceWithCache(ctx, repo, point.Snapshot, filepath.Join(work, "download"), deep); err != nil {
 		return result, err
 	}
-	e.progress("download-and-verify-databases")
+	e.progress("download-databases")
 	if err = e.downloadData(ctx, repo, point.Snapshot, bundle, work); err != nil {
 		return result, err
+	}
+	if deep {
+		e.progress("deep-data-check")
+		if err = payload.Verify(bundle); err != nil {
+			return result, err
+		}
+		if err = e.verifyTelegram(ctx, filepath.Join(bundle, "payload/telegram/data/telegram.db"), meta.Telegram); err != nil {
+			return result, err
+		}
 	}
 	for _, image := range point.Images {
 		if err = e.checkImage(ctx, image, true); err != nil {
 			return result, err
 		}
 	}
-	e.progress("isolated-database-startup")
-	if err = e.probe(ctx, bundle, meta, filepath.Join(work, "probe")); err != nil {
-		return result, err
+	if deep {
+		e.progress("isolated-database-startup")
+		if err = e.probe(ctx, bundle, meta, filepath.Join(work, "probe")); err != nil {
+			return result, err
+		}
 	}
 	root := filepath.Join(work, "rebuilt")
 	copies := map[string]string{"config": "deploy/tuwunel", "telegram/config": "deploy/telegram", "nginx": "deploy/nginx"}
@@ -180,7 +190,7 @@ func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Re
 			return result, err
 		}
 	}
-	result = Restored{1, point.Snapshot, local.Digest(raw), root, work, true, true, false, true}
+	result = Restored{1, point.Snapshot, local.Digest(raw), root, work, deep, deep, false, true}
 	if err = local.JSON(prepared, result); err != nil {
 		return result, err
 	}
@@ -190,7 +200,7 @@ func (e *Engine) publishRestore(result Restored, point Point) error {
 	if err := finishRestore(result.Work); err != nil {
 		return err
 	}
-	proof := map[string]any{"schema": 1, "restore_ready": true, "snapshot_id": result.Snapshot, "point_sha256": result.Hash, "deployment_root": result.Root, "database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "consistency": point.Consistency, "media_included": false, "media_reused_from_s3": true}
+	proof := map[string]any{"schema": 1, "restore_ready": true, "snapshot_id": result.Snapshot, "point_sha256": result.Hash, "deployment_root": result.Root, "database_startup_verified": result.Matrix, "telegram_database_startup_verified": result.Telegram, "production_started": false, "consistency": point.Consistency, "media_included": false, "media_reused_from_s3": true}
 	if err := local.JSON(filepath.Join(result.Root, "recovery-state/result.json"), proof); err != nil {
 		return err
 	}

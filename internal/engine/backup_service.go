@@ -59,5 +59,5 @@ func (b nativeBackupService) Final(ctx context.Context, root, op string) (contro
 }
 
 func (b nativeBackupService) Restore(ctx context.Context, snapshot, hash, work string) (Restored, error) {
-	return b.e.restoreAt(ctx, snapshot, hash, work)
+	return b.e.restoreAt(ctx, snapshot, hash, work, false)
 }

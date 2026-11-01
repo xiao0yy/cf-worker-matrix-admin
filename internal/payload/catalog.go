@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -333,8 +332,10 @@ func unpackConfiguration(input, bundle string) error {
 	return os.Rename(stage, bundle)
 }
 
-// Restic contributes only the two database trees. Validate all names and hashes
-// before linking them into the separately validated R2 configuration bundle.
+// Restic contributes only the two database trees after a successful restore of
+// the pinned snapshot. It owns data integrity; this boundary validates names,
+// types and completeness without rereading database contents. Configuration is
+// separately authenticated by the R2 capsule. Explicit drills use Verify.
 func mergeData(input, bundle string) error {
 	raw, e := boundedFile(filepath.Join(bundle, "manifest.sha256"), 4<<20)
 	if e != nil {
@@ -364,19 +365,6 @@ func mergeData(input, bundle string) error {
 		key := strings.TrimPrefix(rel, "bundle/payload/")
 		if key == rel || !d.Type().IsRegular() || !allowedPayload(key) || !dataPath(key) || entries[key] == "" {
 			return errors.New("unexpected file in database snapshot")
-		}
-		f, e := os.Open(p)
-		if e != nil {
-			return e
-		}
-		h := sha256.New()
-		_, e = io.Copy(h, f)
-		f.Close()
-		if e != nil {
-			return e
-		}
-		if hex.EncodeToString(h.Sum(nil)) != entries[key] {
-			return errors.New("database content hash mismatch")
 		}
 		seen[key] = true
 		paths = append(paths, key)

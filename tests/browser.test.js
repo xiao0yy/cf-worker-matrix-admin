@@ -184,7 +184,7 @@ test("overview separates backup file verification from a restore and startup tes
   );
   assert.equal(
     c.document.getElementById("backup-verification").textContent,
-    "数据库文件校验已通过",
+    "快照文件清单已核对",
   );
   evaluate(c, "openBackup()");
   assert.match(

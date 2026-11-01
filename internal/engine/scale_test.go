@@ -74,7 +74,7 @@ func TestFinalReaderRequiresFreshMatchingIdentity(t *testing.T) {
 		})
 	}
 }
-func TestTerabyteSnapshotRequiresOneDatabasePlusMutableProbeSpace(t *testing.T) {
+func TestTerabyteSnapshotReservesProbeSpaceOnlyForExplicitDrill(t *testing.T) {
 	e := testEngine(t)
 	const table int64 = 1 << 40
 	const mutable int64 = 32 << 20
@@ -89,8 +89,12 @@ func TestTerabyteSnapshotRequiresOneDatabasePlusMutableProbeSpace(t *testing.T) 
 		return nil, errors.New("unexpected command")
 	})
 	need, _ := e.snapshotSpace(context.Background(), Repository{}, strings.Repeat("a", 64))
-	if need != uint64(table+2*mutable)+(1<<30) {
+	if need != uint64(table+mutable)+(1<<30) {
 		t.Fatal("amplified space estimate", need)
+	}
+	drill, _ := e.snapshotSpaceWithCache(context.Background(), Repository{}, strings.Repeat("a", 64), "", true)
+	if drill != need+uint64(mutable) {
+		t.Fatal("missing explicit drill scratch space", drill)
 	}
 	cache := filepath.Join(t.TempDir(), "cache")
 	must(t, os.Mkdir(cache, 0700))
@@ -105,7 +109,7 @@ func TestTerabyteSnapshotRequiresOneDatabasePlusMutableProbeSpace(t *testing.T) 
 	}
 }
 
-// Docker startup is an isolated fixture here; restic transfer, SQLite checks,
+// Docker startup is an isolated fixture here; restic transfer,
 // workspace replay and file moves use the real implementation and local disk.
 func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, receipt control.FinalReceipt) {
 	t.Helper()
@@ -114,8 +118,18 @@ func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, 
 	defer func() { release.Version = version }()
 	real := ExecRunner{filepath.Join(e.Host.Root, "test-restore-logs")}
 	transfers := 0
+	deepRun, probes := false, 0
 	e.Runner = runFunc(func(ctx context.Context, c Command) ([]byte, error) {
+		args := strings.ToLower(strings.Join(c.Args, " "))
+		if !deepRun && c.Name == e.Host.SQLite && (strings.Contains(args, "integrity_check") || strings.Contains(args, "foreign_key_check") || strings.Contains(args, "count(*)")) {
+			t.Fatal("normal handover performed a deep SQLite scan")
+		}
 		if filepath.Base(c.Name) == "restic" {
+			for _, arg := range c.Args {
+				if arg == "--verify" {
+					t.Fatal("normal restore added a complete post-write read")
+				}
+			}
 			c.Name = bin
 			c.Env = append(c.Env, "RESTIC_REPOSITORY="+repoDir)
 			b, err := real.Run(ctx, c)
@@ -139,6 +153,10 @@ func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, 
 		case "image":
 			return []byte(`[{"Id":"sha256:` + strings.Repeat("b", 64) + `","OS":"linux","Architecture":"amd64"}]`), nil
 		case "run":
+			if !deepRun {
+				t.Fatal("normal handover started a second database just to test it")
+			}
+			probes++
 			if !strings.Contains(strings.Join(c.Args, " "), "--network none") {
 				t.Fatal("probe had network")
 			}
@@ -169,14 +187,17 @@ func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, 
 	})
 	ctx := context.Background()
 	work := filepath.Join(e.Host.Root, "generations/handover-resume-test")
-	if _, err := e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work); err == nil || !strings.Contains(err.Error(), "injected") {
+	if _, err := e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work, false); err == nil || !strings.Contains(err.Error(), "injected") {
 		t.Fatal("missing interrupted transfer", err)
 	}
 	cached := filepath.Join(work, "download/bundle/payload/database/MANIFEST-1")
 	before, err := os.Stat(cached)
 	must(t, err)
-	result, err := e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work)
+	result, err := e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work, false)
 	must(t, err)
+	if result.Matrix || result.Telegram || !result.Ready || probes != 0 {
+		t.Fatal("normal restore claimed an isolated startup check", result)
+	}
 	after, err := os.Stat(filepath.Join(result.Root, "deploy/tuwunel/data/MANIFEST-1"))
 	must(t, err)
 	if !os.SameFile(before, after) {
@@ -192,7 +213,7 @@ func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, 
 			t.Fatal("temporary copies survived completion", name)
 		}
 	}
-	again, err := e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work)
+	again, err := e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work, false)
 	must(t, err)
 	if again != result || transfers != 2 {
 		t.Fatal("completed restore replayed", transfers)
@@ -201,7 +222,7 @@ func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, 
 	// ready receipt. The prepared generation must survive without any transfer.
 	must(t, os.Remove(filepath.Join(work, "result.json")))
 	must(t, os.Remove(filepath.Join(result.Root, "recovery-state/result.json")))
-	again, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work)
+	again, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work, false)
 	must(t, err)
 	afterPublish, err := os.Stat(filepath.Join(result.Root, "deploy/tuwunel/data/MANIFEST-1"))
 	must(t, err)
@@ -209,12 +230,19 @@ func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, 
 		t.Fatal("prepared generation was rebuilt or downloaded")
 	}
 	s.Handover = &control.TargetOperation{Root: result.Root}
-	if _, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work); err == nil {
+	if _, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work, false); err == nil {
 		t.Fatal("replayed bound generation")
 	}
 	preserved, err := os.Stat(filepath.Join(result.Root, "deploy/tuwunel/data/MANIFEST-1"))
 	must(t, err)
 	if !os.SameFile(after, preserved) || transfers != 2 {
 		t.Fatal("bound generation touched")
+	}
+	// Deep checks remain available, but require an explicit isolated drill.
+	deepRun = true
+	drill, err := e.Restore(ctx, receipt.Snapshot, receipt.PointHash)
+	must(t, err)
+	if !drill.Ready || !drill.Matrix || !drill.Telegram || probes != 2 {
+		t.Fatal("explicit drill did not verify database startup", drill, probes)
 	}
 }

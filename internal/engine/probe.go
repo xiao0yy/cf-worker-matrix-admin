@@ -40,9 +40,6 @@ func (e *Engine) probe(ctx context.Context, bundle string, m Metadata, work stri
 	if err := local.CopyTree(filepath.Join(bundle, "payload/telegram/data"), tg); err != nil {
 		return err
 	}
-	if err := e.verifyTelegram(ctx, filepath.Join(tg, "telegram.db"), m.Telegram); err != nil {
-		return err
-	}
 	tgName := "telegram-probe-" + local.RandomID()
 	defer e.docker(context.Background(), "rm", "-f", tgName)
 	if _, err := e.docker(ctx, "run", "-d", "--name", tgName, "--network", "none", "--read-only", "--memory", "128m", "--memory-swap", "192m", "--pids-limit", "96", "--cpus", "0.5", "--tmpfs", "/tmp:size=16m", "-v", tg+":/data", m.Images["telegram"].Ref); err != nil {
@@ -85,9 +82,6 @@ func (e *Engine) probe(ctx context.Context, bundle string, m Metadata, work stri
 	}
 	if c.State.Running || (c.State.ExitCode != 0 && c.State.ExitCode != 137 && c.State.ExitCode != 143) {
 		return errors.New("bridge probe failed")
-	}
-	if err = e.verifyTelegram(ctx, filepath.Join(tg, "telegram.db"), m.Telegram); err != nil {
-		return err
 	}
 	return local.JSON(filepath.Join(work, "result.json"), map[string]any{"database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "network": "none", "consistency": m.Consistency, "telegram_authentication_tested": false})
 }

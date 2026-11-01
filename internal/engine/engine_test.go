@@ -149,7 +149,14 @@ func TestSQLiteSnapshotIncludesCommittedWAL(t *testing.T) {
 	container.Mounts = append(container.Mounts, struct{ Source, Destination string }{src, "/data"})
 	must(t, json.Unmarshal([]byte(`{"Networks":{"test-net":{"IPAddress":"172.30.0.3"}}}`), &container.NetworkSettings))
 	real := e.Runner
+	allowDeep := false
 	e.Runner = runFunc(func(ctx context.Context, c Command) ([]byte, error) {
+		if c.Name == e.Host.SQLite && !allowDeep {
+			args := strings.ToLower(strings.Join(c.Args, " "))
+			if strings.Contains(args, "integrity_check") || strings.Contains(args, "foreign_key_check") || strings.Contains(args, "count(*)") {
+				t.Fatal("snapshot scanned the database after SQLite completed its backup", args)
+			}
+		}
 		if c.Name != e.Host.Docker {
 			return real.Run(ctx, c)
 		}
@@ -164,14 +171,21 @@ func TestSQLiteSnapshotIncludesCommittedWAL(t *testing.T) {
 	dest := filepath.Join(e.Host.Root, "snapshot")
 	meta, err := e.telegramSnapshot(context.Background(), project, dest, false)
 	must(t, err)
-	if meta.Counts["message"] != 2 || meta.Restarted {
+	if len(meta.Counts) != 0 || meta.Restarted {
 		t.Fatal(meta)
+	}
+	// Assert the actual WAL row survived, independently of producer metadata.
+	row, err := exec.Command(e.Host.SQLite, "-readonly", filepath.Join(dest, "data/telegram.db"), "SELECT body FROM message WHERE id=2;").Output()
+	must(t, err)
+	if strings.TrimSpace(string(row)) != "committed WAL" {
+		t.Fatal("committed WAL message missing", string(row))
 	}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		if _, err = os.Stat(filepath.Join(dest, "data/telegram.db"+suffix)); !os.IsNotExist(err) {
 			t.Fatal("WAL/SHM copied")
 		}
 	}
+	allowDeep = true
 	must(t, e.verifyTelegram(context.Background(), filepath.Join(dest, "data/telegram.db"), meta))
 	write(t, filepath.Join(src, "new-auth-file"), "unknown")
 	if _, err = e.telegramSnapshot(context.Background(), project, filepath.Join(e.Host.Root, "other"), false); err == nil {
@@ -273,6 +287,41 @@ func TestRealResticDatabaseOnlyRoundTrip(t *testing.T) {
 	must(t, e.downloadData(context.Background(), r, snaps[0].ID, merged, work))
 	if err = e.downloadData(context.Background(), r, strings.Repeat("f", 64), merged, work); err == nil {
 		t.Fatal("reused restore cache for another snapshot")
+	}
+	// Removing the post-restore scan must not turn corruption into success:
+	// restic itself authenticates the encrypted packs during a fresh restore.
+	packs, err := filepath.Glob(filepath.Join(repo, "data", "*", "*"))
+	must(t, err)
+	if len(packs) == 0 {
+		t.Fatal("no packs to corrupt in isolated repository")
+	}
+	for _, pack := range packs {
+		data, err := os.ReadFile(pack)
+		must(t, err)
+		if len(data) == 0 {
+			t.Fatal("empty test pack")
+		}
+		data[0] ^= 0xff
+		must(t, os.WriteFile(pack, data, 0600))
+	}
+	fresh := t.TempDir()
+	must(t, payload.Unpack(capsule, filepath.Join(fresh, "bundle")))
+	if err = e.downloadData(context.Background(), r, snaps[0].ID, filepath.Join(fresh, "bundle"), fresh); err == nil {
+		t.Fatal("corrupted backup was accepted without a deep scan")
+	}
+}
+
+func TestStagedInventoryDoesNotReadDataButDeepDrillDoes(t *testing.T) {
+	bundle, _ := bundleFixture(t, t.TempDir())
+	must(t, payload.VerifyInventory(bundle))
+	write(t, filepath.Join(bundle, "payload/database/MANIFEST-1"), "different local content")
+	must(t, payload.VerifyInventory(bundle))
+	if err := payload.Verify(bundle); err == nil {
+		t.Fatal("explicit deep scan did not detect changed database content")
+	}
+	write(t, filepath.Join(bundle, "payload/config/docker-compose.yml"), "changed configuration")
+	if err := payload.VerifyInventory(bundle); err == nil {
+		t.Fatal("configuration change was ignored by lightweight staging check")
 	}
 }
 
