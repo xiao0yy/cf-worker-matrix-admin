@@ -36,9 +36,7 @@ func pairFixture(t *testing.T) (*Controller, *Controller, *finalAuthority, *fina
 			t.Fatal(e)
 		}
 	}
-	if e := atomicJSON(filepath.Join(root, "recovery-state/result.json"), map[string]any{"database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "consistency": "globally-quiesced"}); e != nil {
-		t.Fatal(e)
-	}
+
 	return a, b, s, da, db, root
 }
 func hcall(c *Controller, action string) error {
@@ -58,6 +56,9 @@ func makePairReady(t *testing.T, a, b *Controller, root string) {
 	data, _ := os.ReadFile(filepath.Join(dir, "point.json"))
 	r := receiptFor(a)
 	r.PointHash = digest(data)
+	if e := atomicJSON(filepath.Join(root, "recovery-state/result.json"), map[string]any{"schema": 1, "restore_ready": true, "snapshot_id": r.Snapshot, "point_sha256": r.PointHash, "deployment_root": root, "production_started": false, "consistency": "globally-quiesced"}); e != nil {
+		t.Fatal(e)
+	}
 	putReceipt(t, a, r)
 	if e := callFinal(a, "complete"); e != nil {
 		t.Fatal(e)
@@ -219,7 +220,7 @@ func TestHandoverCancelRequiresSourceToRemainUnclaimed(t *testing.T) {
 	}
 }
 
-func TestInventoryReceiptStillRequiresTargetStartupProof(t *testing.T) {
+func TestBackupReadinessRequiresMatchingRestoreReadyReceipt(t *testing.T) {
 	a, b, s, _, _, root := pairFixture(t)
 	makePairReady(t, a, b, root)
 	if err := hcall(a, "release"); err != nil {
@@ -235,7 +236,7 @@ func TestInventoryReceiptStillRequiresTargetStartupProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := hcall(b, "bind"); err == nil {
-		t.Fatal("target admitted without startup proof")
+		t.Fatal("target admitted without restore-ready receipt")
 	}
 	if s.state.Phase != "VALIDATING" || gateCode(b) != 403 {
 		t.Fatal("opened target")
@@ -251,5 +252,26 @@ func TestOldPreflightCannotStartNewHandover(t *testing.T) {
 	}
 	if s.state.Phase != "ONLINE" {
 		t.Fatal("stopped source")
+	}
+}
+
+func TestControllerTrustsBackupServiceReadinessWithoutInspectingDatabase(t *testing.T) {
+	a, b, _, _, _, root := pairFixture(t)
+	makePairReady(t, a, b, root)
+	for _, f := range []string{"deploy/tuwunel/data/CURRENT", "deploy/telegram/data/telegram.db"} {
+		if err := os.Remove(filepath.Join(root, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, item := range []struct {
+		c      *Controller
+		action string
+	}{{a, "release"}, {b, "claim"}, {b, "validating"}, {b, "bind"}} {
+		if err := hcall(item.c, item.action); err != nil {
+			t.Fatal(item.action, err)
+		}
+	}
+	if gateCode(b) != 403 {
+		t.Fatal("readiness bypassed startup fencing")
 	}
 }

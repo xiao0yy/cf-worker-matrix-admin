@@ -93,6 +93,9 @@ func (c *Client) request(ctx context.Context, method, key string, query url.Valu
 	sig := hex.EncodeToString(mac(k, "AWS4-HMAC-SHA256\n"+stamp+"\n"+scope+"\n"+local.Digest([]byte(raw))))
 	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+c.Access+"/"+scope+", SignedHeaders="+signed+", Signature="+sig)
 	r.Header.Set("Cache-Control", "no-store")
+	// Read the stored representation, including its strong ETag. Transparent
+	// compression can weaken an HTTP ETag and make every subsequent CAS fail.
+	r.Header.Set("Accept-Encoding", "identity")
 	h := c.HTTP
 	if h == nil {
 		h = &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

@@ -86,6 +86,7 @@ func (e *Engine) Backup(ctx context.Context, full bool) (err error) {
 	return e.backup(ctx, root, "", full)
 }
 func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
+	e.progress("prepare-backup")
 	s, err := e.permit(ctx, op, nil)
 	if err != nil {
 		return err
@@ -162,6 +163,7 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 		return err
 	}
 	if job.Snapshot == "" {
+		e.progress("upload-backup")
 		b, err := e.rest(ctx, job.Repository, "", "snapshots", "--json", "--tag", job.Run)
 		if err != nil {
 			return err
@@ -193,6 +195,7 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 		}
 	}
 	if !job.Verified {
+		e.progress("backup-policy")
 		if job.Full {
 			size, err := treeSize(bundle)
 			if err != nil {
@@ -246,6 +249,7 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 	if _, err = e.permit(ctx, op, &meta.Binding); err != nil {
 		return err
 	}
+	e.progress("publish-backup-ready")
 	point, receipt, err := e.publish(ctx, meta, pending, job)
 	if err != nil {
 		return err
@@ -583,7 +587,7 @@ func (e *Engine) publish(ctx context.Context, m Metadata, pending string, j Back
 		if !j.Verified || j.Full || j.Startup || m.Consistency != "globally-quiesced" {
 			return p, nil, errors.New("final snapshot inventory has not been verified")
 		}
-		receipt := control.FinalReceipt{Schema: 2, Operation: m.Operation, Cluster: e.Cluster, Instance: m.Binding.Instance, Epoch: m.Binding.Epoch, Cutoff: m.Time, Snapshot: j.Snapshot, PointKey: key, PointHash: local.Digest(point), SnapshotVerified: true, Verification: "database-tree", VerifiedAt: j.VerifiedAt}
+		receipt := control.FinalReceipt{Schema: 2, Ready: true, Operation: m.Operation, Cluster: e.Cluster, Instance: m.Binding.Instance, Epoch: m.Binding.Epoch, Cutoff: m.Time, Snapshot: j.Snapshot, PointKey: key, PointHash: local.Digest(point), SnapshotVerified: true, Verification: "database-tree", VerifiedAt: j.VerifiedAt}
 		return p, receipt, nil
 	}
 	index := release.JSON(Index{2, 2, key, local.Digest(point)})

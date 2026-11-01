@@ -375,6 +375,17 @@
           <div id="handover-demo-view"></div>
         </section>
         <section id="switch-active" aria-label="实例交接状态" hidden>
+          <section
+            class="handover-recovery"
+            aria-labelledby="handover-recovery-title"
+          >
+            <h2 id="handover-recovery-title">当前可以做什么</h2>
+            <p id="handover-recovery-note"></p>
+            <div
+              id="handover-recovery-actions"
+              class="maintenance-toolbar"
+            ></div>
+          </section>
           <div id="handover-live-view"></div>
           <div class="handover-actions">
             <p id="progress-note" class="small muted"></p>
@@ -1163,6 +1174,12 @@
         <div class="handover-heading" aria-live="polite" aria-atomic="true">
           <h2 data-field="title"></h2>
           <p data-field="description"></p>
+        </div>
+        <div data-diagnostic class="handover-diagnostic" hidden>
+          <p data-field="failure-step" class="small"></p>
+          <p data-field="failure-cause"></p>
+          <p data-field="failure-latest" class="small"></p>
+          <p data-field="failure-log" class="small"></p>
         </div>
         <div class="ownership-track">
           <span class="ownership-label">服务归属</span>

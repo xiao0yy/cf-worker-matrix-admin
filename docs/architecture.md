@@ -42,9 +42,11 @@ R2 保存配置胶囊、恢复点、仓库凭据和控制状态。B2 只保存 r
 最终备份关闭入口、停止 Telegram 与 Tuwunel，核实干净退出和容器身份，再
 在同一文件系统创建冻结数据库的硬链接视图；跨文件系统明确报错，不退回整库复制。
 源机增量上传并核对快照清单后，生成绑定 operation/instance/epoch 的 schema 2 receipt。
-其中 `snapshot_verified: true`、`verification: database-tree` 只证明上传与清单核对完成，
+其中 `backup_ready: true` 是备份程序给集群的就绪结果；`snapshot_verified` 与
+`verification` 是诊断信息，由备份程序决定校验策略。当前生产者在上传与清单核对后提交，
 不声称已完整回读或启动验证。源机不回下载数据库、不做隔离启动；最终备份不修改 latest。
-新目标恢复后仍须完整内容校验及 `--network none` 隔离启动验证，才允许绑定并上线。
+目标恢复程序负责下载、内容校验和 `--network none` 隔离启动，成功后提交绑定恢复点
+与目录的 `restore_ready`。集群消费该结果，不重复检查数据库文件或依赖具体校验算法。
 旧 schema 1 已完成凭据仍可读取；新交接要求两端报告 `handover_receipt_schema: 2`，
 目标重新预检。混用旧版实例时，网页、API、目标 controller 和源 worker 会阻止推进。
 
@@ -80,11 +82,11 @@ stateDiagram-v2
     ONLINE --> REQUESTED: 用户指定源与目标
     REQUESTED --> QUIESCING: 旧实例关闭入口
     QUIESCING --> QUIESCED: 写者全部停止
-    QUIESCED --> SNAPSHOTTING: 冻结增量备份与清单核对
-    SNAPSHOTTING --> RELEASED: 提交不可变 receipt 并释放
+    QUIESCED --> SNAPSHOTTING: 请求备份程序准备数据
+    SNAPSHOTTING --> RELEASED: 收到 backup_ready 并释放
     RELEASED --> RESTORING: 目标认领下一 epoch
-    RESTORING --> VALIDATING: 数据恢复与隔离启动验证
-    VALIDATING --> STARTING: 绑定 generation，持久化写入意图
+    RESTORING --> VALIDATING: 等待恢复程序准备数据
+    VALIDATING --> STARTING: 收到 restore_ready，绑定 generation
     STARTING --> ONLINE: 健康检查与条件提交
 ```
 
@@ -135,3 +137,15 @@ RUNNING 的进程消失时标记 INTERRUPTED，需显式重试。升级关键安
 可重试原任务，或通过仓库校验后结束维护，再单独恢复服务。媒体不在清理范围。
 旧机清理必须审阅具体目录，替代实例有新鲜 ONLINE/serving 报告且旧机已停用。
 没有基于心跳超时的自动选主、自动更新或自动删除。
+
+## 失败与人工介入
+
+`BackupService` 是交接编排与数据工作的接口。备份程序独立负责数据传输、重试、
+校验及结果持久化；同一个 Go 运行包承载这些职责，并不增加部署依赖。集群仍负责
+停写证明、操作和 epoch 绑定、CAS、服务启动与健康，不把“就绪”当作绕过归属的授权。
+
+切换页直接展示原始失败阶段、时间、原因和私密日志编号。中断单独记录，不能
+覆盖首次失败；原始命令输出只保存在服务器私密日志，R2 只接收分类原因和引用。
+归属释放前可暂停、继续或撤销并恢复源；撤销先停止长任务，然后通过控制器 CAS
+恢复源服务。目标的等待请求单独取消，入口须切回源。归属释放后禁用直接回退，
+只能继续目标或在外部隔离后强制接管。切换未完成不能清理；完成后仍须审阅清理计划。

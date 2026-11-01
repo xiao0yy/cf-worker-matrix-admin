@@ -84,7 +84,7 @@ func toSnapshot(t *testing.T, c *Controller) {
 	}
 }
 func receiptFor(c *Controller) FinalReceipt {
-	return FinalReceipt{Schema: 2, SnapshotVerified: true, Verification: "database-tree", Operation: "test-final", Cluster: "test", Instance: "a", Epoch: 2, Cutoff: c.journal.Final.Cutoff, Snapshot: strings.Repeat("a", 64), PointHash: strings.Repeat("b", 64), PointKey: "cluster/" + "test" + "/recovery/v2/points/" + strings.Repeat("a", 64) + ".json", VerifiedAt: time.Now().UTC().Format(time.RFC3339)}
+	return FinalReceipt{Schema: 2, Ready: true, SnapshotVerified: true, Verification: "database-tree", Operation: "test-final", Cluster: "test", Instance: "a", Epoch: 2, Cutoff: c.journal.Final.Cutoff, Snapshot: strings.Repeat("a", 64), PointHash: strings.Repeat("b", 64), PointKey: "cluster/" + "test" + "/recovery/v2/points/" + strings.Repeat("a", 64) + ".json", VerifiedAt: time.Now().UTC().Format(time.RFC3339)}
 }
 func putReceipt(t *testing.T, c *Controller, r FinalReceipt) {
 	t.Helper()
@@ -230,13 +230,13 @@ func TestFinalReceiptDescribesActualVerification(t *testing.T) {
 	}{
 		{"old verified", FinalReceipt{Schema: 1, Verified: true, StartupVerified: true}, true},
 		{"old incomplete", FinalReceipt{Schema: 1, Verified: true}, false},
-		{"inventory", FinalReceipt{Schema: 2, SnapshotVerified: true, Verification: "database-tree"}, true},
-		{"missing inventory", FinalReceipt{Schema: 2, Verification: "database-tree"}, false},
-		{"false startup claim", FinalReceipt{Schema: 2, SnapshotVerified: true, Verification: "database-tree", StartupVerified: true}, false},
+		{"inventory", FinalReceipt{Schema: 2, Ready: true, SnapshotVerified: true, Verification: "database-tree"}, true},
+		{"missing ready", FinalReceipt{Schema: 2, SnapshotVerified: true, Verification: "database-tree"}, false},
+		{"producer chooses verification policy", FinalReceipt{Schema: 2, Ready: true, Verification: "producer-defined"}, true},
 		{"unknown", FinalReceipt{Schema: 3, SnapshotVerified: true, Verification: "database-tree"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.receipt.BackupVerified() != tc.ok {
+			if tc.receipt.BackupReady() != tc.ok {
 				t.Fatal(tc.receipt)
 			}
 		})

@@ -95,6 +95,7 @@ func (p *Poller) observations(ctx context.Context, report map[string]any) {
 	report["actions"] = actions
 	report["management_protocol"] = management.Protocol
 	report["handover_receipt_schema"] = 2
+	report["handover_abort"] = true
 	report["force_takeover"] = true
 	report["public_address"] = p.publicAddress(ctx, report["host"].(map[string]any))
 	for name, path := range map[string]string{"preflight": filepath.Join(p.cfg.StateDir, "preflight.json"), "health": filepath.Join(p.foundation, "agent/health.json"), "handover_paused": filepath.Join(p.foundation, "agent/handover-paused.json"), "update": filepath.Join(p.foundation, "agent/pending-update.json")} {

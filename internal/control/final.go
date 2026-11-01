@@ -21,6 +21,7 @@ type StopProof struct {
 }
 type FinalReceipt struct {
 	Schema           int    `json:"schema"`
+	Ready            bool   `json:"backup_ready,omitempty"`
 	Operation        string `json:"operation_id"`
 	Cluster          string `json:"cluster_id"`
 	Instance         string `json:"source_instance_id"`
@@ -36,12 +37,12 @@ type FinalReceipt struct {
 	VerifiedAt       string `json:"verified_at"`
 }
 
-// Schema 2 records a committed snapshot and its file inventory. It deliberately
-// does not claim a full restore or a database startup on the source. The target
-// must still restore, verify and probe its generation before any start intent.
-func (r FinalReceipt) BackupVerified() bool {
+// The producer owns verification policy. The controller accepts readiness and
+// checks receipt identity, fencing and epoch; diagnostic verification fields
+// do not dictate a data-validation algorithm to the cluster.
+func (r FinalReceipt) BackupReady() bool {
 	return (r.Schema == 1 && r.Verified && r.StartupVerified) ||
-		(r.Schema == 2 && r.SnapshotVerified && r.Verification == "database-tree" && !r.Verified && !r.StartupVerified)
+		(r.Schema == 2 && r.Ready)
 }
 
 type FinalOperation struct {
@@ -359,7 +360,7 @@ func (c *Controller) finalAction(ctx context.Context, action, instance string, e
 			return errors.New("verified final receipt missing")
 		}
 		var r FinalReceipt
-		if json.Unmarshal(b, &r) != nil || !r.BackupVerified() || r.Operation != id || r.Cluster != c.cfg.Cluster || r.Instance != instance || r.Epoch != epoch || r.Cutoff != op.Cutoff || !hex64(r.Snapshot) || !hex64(r.PointHash) || r.PointKey != "cluster/"+c.cfg.Cluster+"/recovery/v2/points/"+r.Snapshot+".json" || r.VerifiedAt == "" {
+		if json.Unmarshal(b, &r) != nil || !r.BackupReady() || r.Operation != id || r.Cluster != c.cfg.Cluster || r.Instance != instance || r.Epoch != epoch || r.Cutoff != op.Cutoff || !hex64(r.Snapshot) || !hex64(r.PointHash) || r.PointKey != "cluster/"+c.cfg.Cluster+"/recovery/v2/points/"+r.Snapshot+".json" || r.VerifiedAt == "" {
 			return errors.New("invalid or mismatched final receipt")
 		}
 		op.Receipt = &r

@@ -47,6 +47,16 @@ test('cross origin and file origins rejected even with valid identity',async()=>
 test('same origin mutation is allowed after authentication',async()=>{const {env,command}=await fixture();const response=await worker.fetch(request(env,'/api/command','POST',command,{Origin:'https://admin.example'}),env);assert.equal(response.status,200);});
 test('status only reads R2; reports are labelled observations',async()=>{const {env,CONTROL}=await fixture();const response=await worker.fetch(request(env,'/api/status'),env),status=await response.json();assert.equal(status.control.owner,'A');assert.equal(status.instances[0].id,'B');assert.equal(status.instances[0].agent_fresh,true);assert.equal(CONTROL.writes.length,0);});
 test('command submits immutable archive and CAS pending, never control.json',async()=>{const {env,CONTROL,command}=await fixture();const result=await submit(env,command);assert.equal(result.submitted,true);assert.equal(CONTROL.writes.length,2);assert(CONTROL.writes.every(x=>x.startsWith(root+'commands/')));assert.equal((await CONTROL.value(root+'control.json')).owner,'A');});
+test('paused source or target blocks a new handover before writing any command',async()=>{
+ for(const id of ['A','B']){
+  const {env,CONTROL,command}=await fixture();
+  const key=root+'agents/'+id+'.json',agent=await CONTROL.value(key);
+  await CONTROL.set(key,{...agent,handover_paused:{at:new Date().toISOString()}});
+  CONTROL.writes=[];
+  await assert.rejects(()=>submit(env,command),/解除暂停/);
+  assert.deepEqual(CONTROL.writes,[]);
+ }
+});
 test('lost HTTP response retry retains original id despite changed authority',async()=>{const {env,CONTROL,command,control}=await fixture();await submit(env,command);control.phase='QUIESCING';control.revision++;await CONTROL.set(root+'control.json',control);const result=await submit(env,command);assert.equal(result.duplicate,true);assert.equal(result.command.id,'cmd-one');});
 test('reused command id with different body rejected',async()=>{const {env,command}=await fixture();await submit(env,command);await assert.rejects(()=>submit(env,{...command,action:'fence-local'}),/编号/);});
 test('stale expected revision rejected without writes',async()=>{const {env,CONTROL,command}=await fixture();command.expected.revision--;await assert.rejects(()=>submit(env,command),/状态已变化/);assert.equal(CONTROL.writes.length,0);});

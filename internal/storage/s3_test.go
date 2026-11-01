@@ -17,6 +17,9 @@ func TestSignedConditionalRequests(t *testing.T) {
 	var seen []string
 	c := &Client{Endpoint: "https://example.r2.cloudflarestorage.com", Bucket: "fixture", Region: "auto", Access: "test-access", Secret: "test-secret"}
 	c.HTTP = &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Accept-Encoding") != "identity" {
+			t.Fatal("compressed reads can return weak ETags that cannot be used for CAS")
+		}
 		b, _ := io.ReadAll(r.Body)
 		if r.Header.Get("X-Amz-Content-Sha256") != local.Digest(b) {
 			t.Fatal("missing payload hash, including empty GET")

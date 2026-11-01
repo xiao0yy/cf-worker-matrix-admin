@@ -170,3 +170,81 @@ test("demo models remain explicitly illustrative and show failures without live 
   assert.equal(demonstration("STALE").mode, "stale");
   assert.equal(demonstration("ONLINE").mode, "complete");
 });
+
+test("a later cancellation preserves the initial failure and its stage", () => {
+  const s = state("SNAPSHOTTING");
+  s.instances[0].agent.worker_errors = {
+    final: {
+      operation_id: "move-test",
+      step: "final-backup",
+      kind: "interrupted",
+      error: "context canceled",
+      first_failure: {
+        step: "stage-backup",
+        error: "unsupported configuration path: database/archive/001.log",
+      },
+    },
+  };
+  const m = derive(s, true, now);
+  assert.match(m.description, /unsupported configuration path/);
+  assert.equal(m.diagnostic.step, "stage-backup");
+  assert.equal(m.diagnostic.latest.kind, "interrupted");
+});
+
+test("interventions follow ownership boundaries, not just an error badge", () => {
+  const { interventions } = context.window.Handover;
+  for (const phase of ["SNAPSHOTTING", "RELEASED", "VALIDATING", "STARTING"]) {
+    const s = state(phase);
+    s.instances[0].report.final_backup = { id: "move-test" };
+    s.instances[0].agent.handover_abort = true;
+    const plan = interventions(s, derive(s, true, now));
+    assert.equal(
+      plan.actions.some((a) => a.action === "source-resume"),
+      phase === "SNAPSHOTTING",
+      phase,
+    );
+    assert.equal(
+      plan.actions.some((a) => a.action === "cleanup-plan"),
+      false,
+      phase,
+    );
+  }
+  const s = state("ONLINE");
+  assert.equal(
+    interventions(s, derive(s, true, now)).actions[0].action,
+    "cleanup-plan",
+  );
+});
+
+test("rolled back handover keeps routing and pending target cancellation visible", () => {
+  const s = state("SNAPSHOTTING");
+  const op = s.control.operation;
+  s.control.phase = "ONLINE";
+  s.control.operation = null;
+  s.instances[0].report.serving = true;
+  s.instances[1].report.handover = { ...op, phase: "REQUESTED" };
+  const m = derive(s, true, now);
+  assert.equal(m.mode, "rolled-back");
+  assert.equal(m.source.status, "正在服务");
+  assert.equal(m.flow, "none");
+  const plan = context.window.Handover.interventions(s, m);
+  assert.match(plan.note, /Cloudflare/);
+  assert.equal(plan.actions[0].action, "handover-cancel");
+  s.instances[1].report.handover.phase = "CANCELLED";
+  assert.equal(
+    context.window.Handover.interventions(s, derive(s, true, now)).actions
+      .length,
+    0,
+  );
+});
+
+test("a newer running attempt keeps old diagnostics without showing the old failure as current", () => {
+  const s = state("SNAPSHOTTING"), agent = s.instances[0].agent;
+  agent.worker_errors = {final: {operation_id: "move-test", step: "prepare-backup", at: new Date(now - 5000).toISOString(), kind: "failed", error: "no space left on device"}};
+  agent.handover_progress = {operation_id: "move-test", step: "upload-backup", at: new Date(now - 1000).toISOString(), state: "RUNNING"};
+  const m = derive(s, true, now);
+  assert.equal(m.mode, "running");
+  assert.equal(m.flow, "upload");
+  assert.match(m.title, /重试/);
+  assert.equal(m.diagnostic.error, "no space left on device");
+});

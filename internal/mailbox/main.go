@@ -457,6 +457,16 @@ func (p *Poller) report(ctx context.Context, err error) error {
 			}
 		}
 		report["worker_errors"] = details
+		for _, op := range []*Op{st.Handover, st.Final} {
+			if op == nil || !safe(op.ID) {
+				continue
+			}
+			b, er := os.ReadFile(filepath.Join(p.cfg.StateDir, "handover", op.ID, "progress.json"))
+			var v any
+			if er == nil && len(b) < 16384 && json.Unmarshal(b, &v) == nil {
+				report["handover_progress"] = v
+			}
+		}
 		root := st.Deployment
 		if root == "" {
 			root = p.foundation

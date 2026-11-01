@@ -50,7 +50,7 @@ func (c *Controller) verifyStopped(ctx context.Context, op FinalOperation) error
 }
 func validFinalReceipt(op FinalOperation, cluster string) bool {
 	r := op.Receipt
-	return r != nil && r.BackupVerified() && r.Operation == op.ID && r.Cluster == cluster && r.Instance == op.Source && r.Epoch == op.Epoch && r.Cutoff == op.Cutoff && r.VerifiedAt != "" && hex64(r.Snapshot) && hex64(r.PointHash) && r.PointKey == "cluster/"+cluster+"/recovery/v2/points/"+r.Snapshot+".json"
+	return r != nil && r.BackupReady() && r.Operation == op.ID && r.Cluster == cluster && r.Instance == op.Source && r.Epoch == op.Epoch && r.Cutoff == op.Cutoff && r.VerifiedAt != "" && hex64(r.Snapshot) && hex64(r.PointHash) && r.PointKey == "cluster/"+cluster+"/recovery/v2/points/"+r.Snapshot+".json"
 }
 func (c *Controller) handoverAction(ctx context.Context, action, instance string, epoch uint64, id string) error {
 	c.finalMu.Lock()
@@ -394,26 +394,25 @@ func (c *Controller) bindDeployment(ctx context.Context, t TargetOperation) erro
 		return errors.New("released point identity or images mismatch")
 	}
 	var probe struct {
-		Matrix      bool   `json:"database_startup_verified"`
-		Telegram    bool   `json:"telegram_database_startup_verified"`
+		Schema      int    `json:"schema"`
+		Ready       bool   `json:"restore_ready"`
+		Snapshot    string `json:"snapshot_id"`
+		Hash        string `json:"point_sha256"`
+		Root        string `json:"deployment_root"`
 		Production  bool   `json:"production_started"`
 		Consistency string `json:"consistency"`
 	}
 	b, err = os.ReadFile(filepath.Join(root, "recovery-state", "result.json"))
-	if err != nil || json.Unmarshal(b, &probe) != nil || !probe.Matrix || !probe.Telegram || probe.Production || probe.Consistency != point.Consistency {
-		return errors.New("isolated database validation report missing")
+	if err != nil || json.Unmarshal(b, &probe) != nil || probe.Schema != 1 || !probe.Ready || probe.Production || probe.Consistency != point.Consistency || probe.Snapshot != t.Receipt.Snapshot || probe.Hash != t.Receipt.PointHash || probe.Root != root {
+		return errors.New("backup service restore-ready receipt missing or mismatched")
 	}
 	services := append([]Service(nil), c.cfg.Services...)
 	services[0].DataPath = filepath.Join(root, "deploy/tuwunel/data")
 	services[0].Image = point.Image
 	services[1].DataPath = filepath.Join(root, "deploy/telegram/data")
 	services[1].Image = point.Telegram.Image
-	for _, file := range []string{filepath.Join(services[0].DataPath, "CURRENT"), filepath.Join(services[1].DataPath, "telegram.db")} {
-		st, e := os.Lstat(file)
-		if e != nil || !st.Mode().IsRegular() || st.Size() == 0 {
-			return errors.New("restored database missing")
-		}
-	}
+	// Data validation belongs to the backup service. The controller checks the
+	// receipt binding and writer fencing, never reopens or walks the databases.
 	for _, s := range c.services() {
 		running, e := c.docker.Inspect(ctx, s)
 		if !errors.Is(e, errContainerMissing) && (e != nil || running) {

@@ -728,7 +728,7 @@ func testBackupRetry(t *testing.T, final bool) {
 	if final {
 		var receipt control.FinalReceipt
 		must(t, local.ReadJSON(filepath.Join(state, "published.json"), &receipt))
-		if receipt.Schema != 2 || !receipt.BackupVerified() || receipt.StartupVerified || receipt.Verified || first.Full {
+		if receipt.Schema != 2 || !receipt.BackupReady() || receipt.StartupVerified || receipt.Verified || first.Full {
 			t.Fatal("misleading receipt", receipt)
 		}
 		if string(objects.data[e.prefix()+"/latest.json"]) != string(release.JSON(Index{2, 2, key, local.Digest(oldRaw)})) {

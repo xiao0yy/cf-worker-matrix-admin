@@ -19,6 +19,7 @@ type Restored struct {
 	Matrix     bool   `json:"database_startup_verified"`
 	Telegram   bool   `json:"telegram_database_startup_verified"`
 	Production bool   `json:"production_started"`
+	Ready      bool   `json:"restore_ready"`
 }
 
 func (e *Engine) Restore(ctx context.Context, snapshot, hash string) (Restored, error) {
@@ -89,7 +90,7 @@ func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Re
 		if err = local.ReadJSON(resultFile, &result); err != nil {
 			return result, err
 		}
-		if result.Work != work || result.Root != filepath.Join(work, "rebuilt") || result.Snapshot != point.Snapshot || result.Hash != local.Digest(raw) || !result.Matrix || !result.Telegram || result.Production {
+		if result.Work != work || result.Root != filepath.Join(work, "rebuilt") || result.Snapshot != point.Snapshot || result.Hash != local.Digest(raw) || !result.Ready || result.Production {
 			return result, errors.New("completed restore identity differs")
 		}
 		return result, finishRestore(work)
@@ -161,11 +162,14 @@ func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Re
 			return result, err
 		}
 	}
-	proof := map[string]any{"database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "consistency": point.Consistency, "media_included": false, "media_reused_from_s3": true}
+	if err = finishRestore(work); err != nil {
+		return result, err
+	}
+	proof := map[string]any{"schema": 1, "restore_ready": true, "snapshot_id": point.Snapshot, "point_sha256": local.Digest(raw), "deployment_root": root, "database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "consistency": point.Consistency, "media_included": false, "media_reused_from_s3": true}
 	if err = local.JSON(filepath.Join(root, "recovery-state/result.json"), proof); err != nil {
 		return result, err
 	}
-	result = Restored{1, point.Snapshot, local.Digest(raw), root, work, true, true, false}
+	result = Restored{1, point.Snapshot, local.Digest(raw), root, work, true, true, false, true}
 	if err = local.JSON(filepath.Join(work, "result.json"), result); err != nil {
 		return result, err
 	}

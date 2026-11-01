@@ -691,3 +691,69 @@ test("switch explains incompatible source and target before offering handover",a
  assert.equal(card.querySelector(".badge").textContent,"预检已失效");
  assert.match(card.querySelector(".target-reason").textContent,/旧版交接流程/);
 });
+
+test("handover recovery actions are visible and use the source identity", () => {
+  const c = browser(),
+    s = fixture();
+  const op = {
+    id: "move-test",
+    mode: "planned",
+    source: "node-a",
+    target: "node-b",
+    source_epoch: 1,
+    next_epoch: 2,
+    phase: "SNAPSHOTTING",
+  };
+  s.control.phase = "SNAPSHOTTING";
+  s.control.operation = op;
+  s.instances[0].report.serving = false;
+  s.instances[0].report.final_backup = op;
+  s.instances[0].agent.handover_abort = true;
+  s.instances[0].agent.worker_errors = {
+    final: {
+      operation_id: op.id,
+      step: "backup",
+      kind: "interrupted",
+      error: "context canceled",
+      first_failure: {
+        step: "stage-backup",
+        error: "unsupported configuration path: database/archive/001.log",
+        log: "command-fixture.log",
+      },
+    },
+  };
+  setSnapshot(c, s);
+  const root = c.document.getElementById("switch-active");
+  assert.match(root.textContent, /归属尚未释放/);
+  assert.match(root.textContent, /database\/archive\/001.log/);
+  assert.match(root.textContent, /原始错误已保留/);
+  const rollback = root.querySelector('[data-intervention="source-resume"]');
+  assert(rollback);
+  assert.equal(rollback.disabled, false);
+  rollback.onclick();
+  assert.equal(evaluate(c, "actionContext.target"), "node-a");
+  assert.equal(c.document.getElementById("action-dialog").open, true);
+  s.control.phase = "RELEASED";
+  s.control.owner = "";
+  setSnapshot(c, s);
+  assert.equal(root.querySelector('[data-intervention="source-resume"]'), null);
+  assert.match(root.textContent, /不能直接恢复旧机/);
+});
+
+test("new handover explains a paused source or target and unpauses the correct instance", () => {
+  for (const index of [0, 1]) {
+    const c = browser(), s = fixture(), calls = [];
+    c.window.Management = {load() {}, render() {}, queue: (...args) => calls.push(args)};
+    const i = s.instances[index];
+    Object.assign(i.agent, {handover_paused: {at: s.at}, management_protocol: 1, actions: ["handover-continue"]});
+    setSnapshot(c, s);
+    const row = c.document.querySelector(".target-option");
+    assert.match(row.textContent, index === 0 ? /源实例已暂停切换/ : /目标实例已暂停切换/);
+    assert.equal(row.querySelector("input").disabled, true);
+    const resume = row.querySelector("button");
+    assert.equal(resume.textContent, "解除暂停");
+    assert.equal(resume.disabled, false);
+    resume.onclick();
+    assert.deepEqual(calls, [[i.id, "handover-continue"]]);
+  }
+});

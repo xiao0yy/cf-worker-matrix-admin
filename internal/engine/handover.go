@@ -12,13 +12,6 @@ import (
 	"time"
 )
 
-func (e *Engine) recordError(path, op, step string, err error) {
-	if err == nil {
-		_ = os.Remove(filepath.Join(path, "error.json"))
-		return
-	}
-	_ = local.JSON(filepath.Join(path, "error.json"), map[string]any{"operation_id": op, "step": step, "at": e.stamp(), "error": err.Error()})
-}
 func (e *Engine) requireFinalReader(ctx context.Context, target string) error {
 	if !local.SafeID(target) {
 		return errors.New("invalid target identity")
@@ -126,32 +119,12 @@ func (e *Engine) final(ctx context.Context, op, id string, epoch uint64) (err er
 		return errors.New("final operation changed")
 	}
 	if s.Final.Phase != "READY" {
-		step = "backup-and-verify"
-		state := filepath.Join(root, "backup-state/tuwunel-restic")
-		checkpoint := filepath.Join(root, "deploy/tuwunel/data/checkpoint-restic")
-		if _, err = os.Stat(checkpoint); err == nil {
-			if _, err = os.Stat(filepath.Join(state, "preparing/request.json")); err != nil {
-				return errors.New("unclassified interrupted checkpoint; source retained")
-			}
-			dst := filepath.Join(state, "finals", op, "interrupted-checkpoint")
-			if err = os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
-				return err
-			}
-			if err = os.Rename(checkpoint, dst); err != nil {
-				return err
-			}
+		step = "wait-backup-ready"
+		receipt, backupErr := e.backupService().Final(ctx, root, op)
+		if backupErr != nil {
+			return backupErr
 		}
-		published := filepath.Join(state, "finals", op, "published.json")
-		if _, err = os.Stat(published); errors.Is(err, os.ErrNotExist) {
-			if err = e.backup(ctx, root, op, false); err != nil {
-				return err
-			}
-		}
-		var receipt control.FinalReceipt
-		if err = local.ReadJSON(published, &receipt); err != nil {
-			return err
-		}
-		if receipt.Operation != op || receipt.Instance != id || receipt.Epoch != epoch || !receipt.BackupVerified() {
+		if receipt.Operation != op || receipt.Instance != id || receipt.Epoch != epoch || !receipt.BackupReady() {
 			return errors.New("final receipt identity differs")
 		}
 		if err = e.action(ctx, "final-verify", op, id, epoch); err != nil {
@@ -168,14 +141,31 @@ func (e *Engine) final(ctx context.Context, op, id string, epoch uint64) (err er
 	return nil
 }
 func (e *Engine) SourceResume(ctx context.Context, op, id string, epoch uint64) error {
+	if !local.SafeID(op) || strings.Contains(op, ".") || !local.SafeID(id) || epoch == 0 {
+		return errors.New("explicit operation/instance/epoch required")
+	}
+	// Stop progression before waiting on the operation lock. A rollback must
+	// work while a long transfer is active, not require a hidden second action.
+	s, err := e.status(ctx)
+	if err != nil {
+		return err
+	}
+	if s.Control == nil || s.Instance != id || s.Control.Owner != id || s.Control.Epoch != epoch || (s.Final != nil && s.Final.ID != op) || (s.Final == nil && s.Control.Phase != "ONLINE") {
+		return errors.New("source rollback requires the matching unreleased operation and ownership")
+	}
+	if s.Final != nil {
+		if err = e.PauseHandover(ctx, id, true); err != nil {
+			return err
+		}
+		if err = e.system(ctx, "stop", "matrix-handover.service"); err != nil {
+			return err
+		}
+	}
 	unlock, err := local.Lock(filepath.Join(e.Host.Root, "agent/operation.lock"))
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if !local.SafeID(op) || !local.SafeID(id) || epoch == 0 {
-		return errors.New("explicit operation/instance/epoch required")
-	}
 	if err = e.action(ctx, "final-resume", op, id, epoch); err != nil {
 		return err
 	}
@@ -256,8 +246,26 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 		return err
 	}
 	step := "inspect"
+	previousProgress := e.Progress
+	e.Progress = func(stage string) {
+		step = stage
+		_ = local.JSON(filepath.Join(base, "progress.json"), map[string]any{"operation_id": op.ID, "step": stage, "at": e.stamp(), "state": "RUNNING"})
+		if previousProgress != nil {
+			previousProgress(stage)
+		}
+	}
+	e.progress(step)
 	defer func() {
+		e.Progress = previousProgress
 		e.recordError(base, op.ID, step, err)
+		state := "SUCCEEDED"
+		if err != nil {
+			state = "FAILED"
+		}
+		if errors.Is(err, context.Canceled) {
+			state = "INTERRUPTED"
+		}
+		_ = local.JSON(filepath.Join(base, "progress.json"), map[string]any{"operation_id": op.ID, "step": step, "at": e.stamp(), "state": state})
 		if err != nil {
 			pauseErr := local.JSON(filepath.Join(e.Host.Root, "agent/handover-paused.json"), map[string]any{"at": e.stamp(), "operation_id": op.ID, "reason": "handover failed; inspect error and explicitly continue", "step": step})
 			if pauseErr != nil {
@@ -319,7 +327,7 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 		var restored Restored
 		record := filepath.Join(base, "recovery.json")
 		if _, err = os.Stat(record); errors.Is(err, os.ErrNotExist) {
-			restored, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, filepath.Join(e.Host.Root, "generations", "handover-"+op.ID))
+			restored, err = e.backupService().Restore(ctx, receipt.Snapshot, receipt.PointHash, filepath.Join(e.Host.Root, "generations", "handover-"+op.ID))
 			if err != nil {
 				return err
 			}
@@ -331,7 +339,7 @@ func (e *Engine) Handover(ctx context.Context) (err error) {
 		} else if err = local.ReadJSON(record, &restored); err != nil {
 			return err
 		}
-		if restored.Snapshot != receipt.Snapshot || restored.Hash != receipt.PointHash || !restored.Matrix || !restored.Telegram || restored.Production {
+		if restored.Snapshot != receipt.Snapshot || restored.Hash != receipt.PointHash || !restored.Ready || restored.Production {
 			return errors.New("restore receipt differs")
 		}
 		raw, err := os.ReadFile(filepath.Join(restored.Work, "point.json"))

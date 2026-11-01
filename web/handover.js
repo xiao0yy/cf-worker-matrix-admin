@@ -8,11 +8,19 @@ window.Handover = (() => {
     "停止写入",
     "最终备份",
     "释放归属",
-    "恢复与校验",
+    "恢复数据",
     "启动服务",
     "完成切换",
   ];
   const phases = {
+    ROLLED_BACK: [
+      0,
+      "交接已撤销，服务归属回到源实例",
+      "目标未获得写入权；源实例是否恢复服务以最新健康报告为准。",
+      "等待确认",
+      "保留备份",
+      "保持停用",
+    ],
     REQUESTED: [
       0,
       "等待源实例确认",
@@ -32,7 +40,7 @@ window.Handover = (() => {
     QUIESCED: [
       2,
       "数据已冻结，准备最终备份",
-      "旧实例已停止写入，接下来保存并验证冻结后的数据库。",
+      "旧实例已停止写入，等待备份程序保存冻结后的数据。",
       "已停止写入",
       "准备备份",
       "等待接管",
@@ -40,9 +48,9 @@ window.Handover = (() => {
     SNAPSHOTTING: [
       2,
       "正在保存最后一份数据",
-      "上传冻结快照并完整回读验证，完成后才能释放服务归属。",
+      "备份程序保存冻结数据并报告就绪，集群收到结果后才会释放归属。",
       "保持停写",
-      "备份与验证中",
+      "等待备份就绪",
       "等待恢复点",
     ],
     READY: [
@@ -71,16 +79,16 @@ window.Handover = (() => {
     ],
     VALIDATING: [
       4,
-      "正在恢复并校验数据",
-      "下载快照、恢复数据库并进行隔离启动验证。此阶段尚未对外服务。",
+      "备份程序正在恢复数据",
+      "备份程序下载快照、恢复数据库，准备好后报告就绪。集群等待结果，不重复校验数据。",
       "保持停止",
       "提供恢复点",
-      "恢复与校验中",
+      "等待恢复就绪",
     ],
     STARTING: [
       5,
       "正在启动新实例",
-      "数据库恢复与校验已完成，等待服务健康检查和上线确认。",
+      "备份程序已报告数据就绪，等待服务健康检查和上线确认。",
       "保持停止",
       "恢复点已验证",
       "启动与健康检查",
@@ -108,8 +116,20 @@ window.Handover = (() => {
   function derive(snapshot, statusValid, now = Date.now()) {
     const c = snapshot?.control;
     if (!c) return null;
-    const completed = c.phase === "ONLINE";
-    const op = completed ? c.last_completed : c.operation;
+    const aborted =
+      c.phase === "ONLINE" && !c.operation
+        ? snapshot.instances
+            .map((i) => i.report?.handover)
+            .find(
+              (op) =>
+                op?.mode === "planned" &&
+                ["REQUESTED", "CANCELLED"].includes(op.phase) &&
+                op.source === c.owner &&
+                op.source_epoch === c.epoch,
+            )
+        : null;
+    const completed = c.phase === "ONLINE" && !aborted;
+    const op = aborted || (completed ? c.last_completed : c.operation);
     if (
       !op ||
       !["planned", "forced"].includes(op.mode) ||
@@ -123,8 +143,11 @@ window.Handover = (() => {
     const target = snapshot.instances.find((i) => i.id === op.target);
     // READY is a real intermediate state: the control phase returns to
     // QUIESCED after snapshot verification, before handing over ownership.
-    const phase =
-      c.phase === "QUIESCED" && op.phase === "READY" ? "READY" : c.phase;
+    const phase = aborted
+      ? "ROLLED_BACK"
+      : c.phase === "QUIESCED" && op.phase === "READY"
+        ? "READY"
+        : c.phase;
     const definition = phases[phase];
     const known = !!definition;
     const [step, title, description, sourceStatus, storeStatus, targetStatus] =
@@ -144,10 +167,20 @@ window.Handover = (() => {
     const currentErrors = Object.values(
       worker?.agent?.worker_errors || {},
     ).filter((e) => e?.operation_id === op.id && e.error);
+    const detail =
+      currentErrors.find((e) => e.first_failure)?.first_failure ||
+      currentErrors.find((e) => e.kind !== "interrupted") ||
+      currentErrors[0];
+    const progress = worker?.agent?.handover_progress;
+    const retrying =
+      progress?.operation_id === op.id &&
+      progress.state === "RUNNING" &&
+      currentErrors.length > 0 &&
+      currentErrors.every((e) => Date.parse(progress.at) > Date.parse(e.at));
     const failure =
       worker?.report?.error ||
       worker?.agent?.error ||
-      currentErrors[0]?.error ||
+      (!retrying && detail?.kind !== "interrupted" ? detail?.error : "") ||
       "";
     const onlineConfirmed =
       completed &&
@@ -168,13 +201,14 @@ window.Handover = (() => {
           i.report?.serving &&
           (i.id !== c.owner || i.report.bound_epoch !== c.epoch),
       );
-    const mode =
-      !known
-        ? "unknown"
-        : conflict
-          ? "error"
-          : stale
-            ? "stale"
+    const mode = !known
+      ? "unknown"
+      : conflict
+        ? "error"
+        : stale
+          ? "stale"
+          : aborted
+            ? "rolled-back"
             : failure
               ? "error"
               : worker?.agent?.handover_paused && !completed
@@ -202,7 +236,13 @@ window.Handover = (() => {
       source: {
         name: name(source || { id: op.source }),
         ip: source?.info?.public_ip || source?.agent?.public_address?.ip || "",
-        status: forced ? "人工确认已隔离" : sourceStatus,
+        status: aborted
+          ? fresh(source, "report", now) && source.report.serving
+            ? "正在服务"
+            : "服务尚未确认恢复"
+          : forced
+            ? "人工确认已隔离"
+            : sourceStatus,
       },
       target: {
         name: name(target || { id: op.target }),
@@ -220,7 +260,9 @@ window.Handover = (() => {
               ? "交接需要检查"
               : mode === "awaiting"
                 ? "等待新实例的上线报告"
-                : title,
+                : retrying
+                  ? "正在重试当前步骤"
+                  : title,
       description:
         mode === "paused"
           ? "保留当前阶段和数据，可在运维工具继续推进。"
@@ -245,7 +287,76 @@ window.Handover = (() => {
       started: op.started_at,
       cutoff: op.cutoff_time,
       snapshot: op.recovery_set?.snapshot_id || "",
-      raw: { control_phase: c.phase, operation: op },
+      diagnostic: detail ? { ...detail, latest: currentErrors[0] } : null,
+      rolledBack: !!aborted,
+      sourceId: op.source,
+      targetId: op.target,
+      raw: {
+        control_phase: c.phase,
+        operation: op,
+        worker_errors: currentErrors,
+      },
+    };
+  }
+
+  function interventions(snapshot, model) {
+    const c = snapshot?.control,
+      op = model?.raw?.operation;
+    if (!c || !op) return { actions: [], note: "" };
+    const source = snapshot.instances.find((i) => i.id === op.source);
+    const target = snapshot.instances.find((i) => i.id === op.target);
+    const actions = [];
+    const add = (action, target, label, reason = "") =>
+      actions.push({ action, target, label, reason });
+    if (model.rolledBack) {
+      if (target?.report?.handover?.phase !== "CANCELLED")
+        add("handover-cancel", op.target, "取消目标等待请求");
+      return {
+        actions,
+        note: "旧机数据保留。确认源实例恢复服务后，将 Cloudflare 回源切回源实例；页面无法替你确认入口已切回。再次迁移需要新的最终备份。",
+      };
+    }
+    if (model.mode === "complete") {
+      add("cleanup-plan", op.source, "查看旧机清理计划");
+      return {
+        actions,
+        note: "新实例已上线，旧机数据仍保留。清理须先审阅路径，不会自动执行。",
+      };
+    }
+    const beforeRelease =
+      !model.forced &&
+      c.owner === op.source &&
+      c.epoch === op.source_epoch &&
+      ["REQUESTED", "QUIESCING", "QUIESCED", "SNAPSHOTTING"].includes(c.phase);
+    const worker = beforeRelease ? source : target;
+    if (worker)
+      add(
+        worker.agent?.handover_paused ? "handover-continue" : "handover-pause",
+        worker.id,
+        worker.agent?.handover_paused ? "继续当前切换" : "暂停切换",
+      );
+    if (beforeRelease) {
+      if (source?.report?.final_backup?.id === op.id) {
+        const reason =
+          !source.agent?.handover_abort && !source.agent?.handover_paused
+            ? "此实例需先暂停切换，才能撤销交接。"
+            : "";
+        add("source-resume", op.source, "撤销交接并恢复旧机", reason);
+      } else if (c.phase === "REQUESTED")
+        add("handover-cancel", op.target, "取消交接请求");
+      return {
+        actions,
+        note: "归属尚未释放，旧机数据保留。可撤销交接并恢复旧机，再把 Cloudflare 回源切回旧机。暂停只停止推进，不会自动恢复服务。",
+      };
+    }
+    if (
+      target?.report?.blocked &&
+      (c.phase === "STARTING" || target.report.handover?.may_have_written)
+    )
+      add("handover-resume", op.target, "恢复目标服务");
+    return {
+      actions,
+      note: "归属已经释放或转移，不能直接恢复旧机。请继续目标任务；需要更换目标时，先隔离所有可能写入的实例，再从运维工具强制接管。现有数据保留，切换期间禁止清理。",
     };
   }
 
@@ -320,6 +431,28 @@ window.Handover = (() => {
         scene.dataset.stage = String(next.step);
         set("title", next.title);
         set("description", next.description);
+        const diagnostic = root.querySelector("[data-diagnostic]");
+        diagnostic.hidden = !next.diagnostic;
+        set(
+          "failure-step",
+          next.diagnostic
+            ? `失败阶段：${next.diagnostic.step || "未记录"} · ${next.diagnostic.at || "时间未记录"}`
+            : "",
+        );
+        set("failure-cause", next.diagnostic?.error || "");
+        const latest = next.diagnostic?.latest;
+        set(
+          "failure-latest",
+          latest && latest.error !== next.diagnostic.error
+            ? `最后事件：${latest.kind === "interrupted" ? "操作被中断，以上原始错误已保留" : latest.error}`
+            : "",
+        );
+        set(
+          "failure-log",
+          next.diagnostic?.log
+            ? `服务器私密日志：agent/logs/${next.diagnostic.log}`
+            : "",
+        );
         set(
           "state",
           {
@@ -330,6 +463,7 @@ window.Handover = (() => {
             error: "需要处理",
             awaiting: "等待确认",
             unknown: "未知状态",
+            "rolled-back": "交接已撤销",
           }[next.mode],
         );
         set("source-name", next.source.name);
@@ -351,7 +485,9 @@ window.Handover = (() => {
         );
         set(
           "stage-count",
-          next.step < 0
+          next.rolledBack
+            ? "本次交接已结束"
+            : next.step < 0
             ? "阶段未知"
             : next.mode === "complete"
               ? next.forced
@@ -363,12 +499,15 @@ window.Handover = (() => {
         );
         set(
           "snapshot",
-          next.snapshot
+          next.rolledBack
+            ? "源实例数据保留；重新切换须生成新的最终备份"
+            : next.snapshot
             ? "恢复点 " + next.snapshot.slice(0, 12)
             : "等待生成最终恢复点",
         );
         fields.snapshot.title = next.snapshot;
         set("detail", JSON.stringify(next.raw, null, 2));
+        list.hidden = !!next.rolledBack;
         for (const [index, item] of [...list.children].entries()) {
           item.hidden = !!next.forced && index < 4;
           item.lastElementChild.textContent =
@@ -443,5 +582,5 @@ window.Handover = (() => {
       raw: { demonstration: true, phase },
     };
   }
-  return { derive, create, demonstration };
+  return { derive, create, demonstration, interventions };
 })();

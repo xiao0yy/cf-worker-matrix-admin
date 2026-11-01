@@ -86,6 +86,7 @@ export async function submit(env,input) {
   if(c.action==='handover-request'){
     const source=await jsonObject(env.CONTROL,base+'agents/'+state.owner+'.json');
     if(instance.agent.handover_receipt_schema!==2||source?.value?.handover_receipt_schema!==2||source.value.instance_id!==state.owner||source.value.cluster_id!==env.CLUSTER_ID||!isFresh(source.value))throw new Fault(409,'源和目标都需升级到支持交接凭据 v2 的版本，并重新上报状态');
+    if(source.value.handover_paused||instance.agent.handover_paused)throw new Fault(409,'源或目标的切换任务仍处于暂停状态，请解除暂停并等待新报告，再发起交接');
   }
   if(c.action==='force-takeover'&&instance.agent.handover_receipt_schema!==2)throw new Fault(409,'接管目标需先升级到支持增量交接与恢复续传的版本；不要求离线源实例升级');
   validateManagementTarget(c,state,instance);

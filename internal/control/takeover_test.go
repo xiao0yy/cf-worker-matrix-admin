@@ -25,7 +25,7 @@ func forceFixture(t *testing.T) (*Controller, *Controller, *finalAuthority, stri
 	if err := os.WriteFile(filepath.Join(dir, "point.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := atomicJSON(filepath.Join(root, "recovery-state/result.json"), map[string]any{"database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "consistency": "independent-online-snapshots"}); err != nil {
+	if err := atomicJSON(filepath.Join(root, "recovery-state/result.json"), map[string]any{"schema": 1, "restore_ready": true, "snapshot_id": r.Parameters.Snapshot, "point_sha256": r.Parameters.PointHash, "deployment_root": root, "production_started": false, "consistency": "independent-online-snapshots"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := atomicJSON(filepath.Join(dir, "deployment.json"), map[string]any{"schema": 1, "deployment_root": root, "operation_id": r.ID, "instance_id": "b", "epoch": 3}); err != nil {

@@ -29,7 +29,7 @@ const actions = {
   ],
   "source-resume": [
     "中止交接并恢复源实例",
-    "仅限归属释放之前；若备份任务还在执行会拒绝操作。恢复后还需取消目标请求，并将 Cloudflare 入口切回源实例。",
+    "仅限归属释放之前。新版会先停止切换任务，再恢复旧机；旧版需先暂停。恢复后取消目标等待请求，并将 Cloudflare 回源切回源实例。现有数据保留。",
   ],
 };
 Object.assign(
@@ -682,8 +682,21 @@ function switchAvailability(i) {
     return stop("源实例未就绪", "请先确认源实例正常在线，才能发起正常交接。");
   if (i.report.serving !== false)
     return stop("目标仍在服务", "目标实例仍报告正在服务，请先检查归属。");
-  if (i.agent?.handover_receipt_schema !== 2 || owner.agent?.handover_receipt_schema !== 2)
-    return stop("需要升级", "源实例和目标实例都需升级到支持交接凭据 v2 的版本，再重新执行预检。");
+  const paused = [owner, i].find((node) => node.agent?.handover_paused);
+  if (paused)
+    return stop(
+      paused.id === owner.id ? "源实例已暂停切换" : "目标实例已暂停切换",
+      instanceName(paused) + " 的切换任务仍处于暂停状态。解除暂停并等待新的状态报告后，才能发起交接。",
+      { continueInstance: paused.id },
+    );
+  if (
+    i.agent?.handover_receipt_schema !== 2 ||
+    owner.agent?.handover_receipt_schema !== 2
+  )
+    return stop(
+      "需要升级",
+      "源实例和目标实例都需升级到支持交接凭据 v2 的版本，再重新执行预检。",
+    );
   const pre = i.agent?.preflight;
   const observation = window.Management?.preflightObservation(i);
   const task = observation?.task;
@@ -755,7 +768,9 @@ function switchAvailability(i) {
       { preflight: true },
     );
   if (pre.handover_receipt_schema !== 2)
-    return stop("预检已失效", "预检来自旧版交接流程，请升级后重新执行预检。", { preflight: true });
+    return stop("预检已失效", "预检来自旧版交接流程，请升级后重新执行预检。", {
+      preflight: true,
+    });
   return { label: "可作为目标", reason: "" };
 }
 function renderSwitch() {
@@ -774,7 +789,10 @@ function renderSwitch() {
   $("switch-wizard").hidden = active || demo;
   if (active) {
     liveHandover.render(model);
-    $("handover-new").hidden = model.mode !== "complete";
+    renderHandoverRecovery(model);
+    $("handover-new").hidden = !["complete", "rolled-back"].includes(
+      model.mode,
+    );
     text(
       "progress-note",
       model.mode === "complete"
@@ -839,6 +857,20 @@ function renderSwitch() {
     if (status.hint)
       explanation.append(element("p", "target-hint", status.hint));
     const controls = element("div", "target-actions");
+    if (status.continueInstance && window.Management) {
+      const paused = findInstance(status.continueInstance);
+      const why = commandBlocker(paused) ||
+        (paused?.agent?.management_protocol !== 1 ||
+        !paused.agent.actions?.includes("handover-continue")
+          ? "此实例尚不支持远程解除暂停，请先升级。" : "");
+      const resume = button("解除暂停", () =>
+        window.Management.queue(paused.id, "handover-continue"),
+      );
+      resume.disabled = !!why;
+      resume.dataset.focusKey = paused.id + "-continue";
+      controls.append(resume);
+      if (why) explanation.append(element("p", "target-hint", why));
+    }
     if (status.preflight && window.Management) {
       const why = window.Management.preflightBlocker(i);
       if (why) explanation.append(element("p", "target-hint", why));
@@ -890,10 +922,52 @@ function renderSwitch() {
   }
   updateSwitchSubmit();
 }
+function renderHandoverRecovery(model) {
+  const recovery = window.Handover.interventions(snapshot, model);
+  text("handover-recovery-note", recovery.note);
+  const controls = recovery.actions.map((choice) => {
+    const i = findInstance(choice.target);
+    const managed = [
+      "handover-pause",
+      "handover-continue",
+      "cleanup-plan",
+    ].includes(choice.action);
+    const why =
+      choice.reason ||
+      commandBlocker(i) ||
+      (managed &&
+      (i?.agent?.management_protocol !== 1 ||
+        !i.agent.actions?.includes(choice.action))
+        ? "此实例尚不支持该远程操作，请先升级。"
+        : "");
+    const group = element("div", "handover-recovery-action");
+    const control = button(
+      choice.label,
+      () => {
+        if (managed) window.Management.queue(choice.target, choice.action);
+        else {
+          $("target").value = choice.target;
+          openAction(choice.action);
+        }
+      },
+      "button-secondary",
+    );
+    control.disabled = !!why;
+    control.dataset.focusKey = "handover-" + choice.action;
+    control.dataset.intervention = choice.action;
+    group.append(control);
+    if (why) group.append(element("p", "small muted", why));
+    return group;
+  });
+  replaceContent($("handover-recovery-actions"), controls);
+}
 let dismissedHandover = "",
   demoTimer = null,
   demoPlaying = false;
 const liveHandover = window.Handover.create($("handover-live-view"));
+$("handover-live-view")
+  .querySelector(".ownership-track")
+  .before($("handover-recovery-title").closest("section"));
 const demoHandover = window.Handover.create($("handover-demo-view"));
 const demoSequence = [
   "REQUESTED",
@@ -1064,6 +1138,14 @@ function renderTools() {
       why = "此实例没有目标切换任务。";
     if (!why && action === "source-resume" && !i.report?.final_backup)
       why = "此实例没有源备份任务。";
+    if (!why && action === "source-resume" &&
+      (i.id !== snapshot.control.owner ||
+        i.report.bound_epoch !== snapshot.control.epoch ||
+        !["QUIESCING", "QUIESCED", "SNAPSHOTTING"].includes(snapshot.control.phase)))
+      why = "源归属已释放或转移，不能直接恢复旧机。";
+    if (!why && action === "source-resume" &&
+      !i.agent?.handover_abort && !i.agent?.handover_paused)
+      why = "此实例需先暂停切换，才能撤销交接。";
     if (
       !why &&
       action === "resume-local" &&

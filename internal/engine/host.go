@@ -121,10 +121,17 @@ func (r ExecRunner) Run(ctx context.Context, c Command) ([]byte, error) {
 		cmd.Stderr = out
 	}
 	if e := cmd.Run(); e != nil {
+		log := ""
 		if r.LogDir != "" {
-			_ = local.Atomic(filepath.Join(r.LogDir, "command-"+local.RandomID()+".log"), append(out.Bytes(), errout.Bytes()...), 0600)
+			name := "command-" + local.RandomID() + ".log"
+			if local.Atomic(filepath.Join(r.LogDir, name), append(out.Bytes(), errout.Bytes()...), 0600) == nil {
+				log = name
+			}
 		}
-		return nil, fmt.Errorf("%s failed; inspect private command logs: %w", filepath.Base(c.Name), e)
+		if ctx.Err() != nil {
+			e = ctx.Err()
+		}
+		return nil, &commandFailure{Program: filepath.Base(c.Name), Reason: commandReason(e, append(out.Bytes(), errout.Bytes()...)), Log: log, Cause: e}
 	}
 	return out.Bytes(), nil
 }
@@ -142,6 +149,7 @@ type Engine struct {
 	ReleaseDir string
 	Now        func() time.Time
 	Progress   func(string)
+	Backups    BackupService
 }
 
 func New(root string) (*Engine, error) {
@@ -212,7 +220,13 @@ func (e *Engine) controlCall(ctx context.Context, action string, v any) ([]byte,
 		return nil, errors.New("invalid controller response")
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("controller rejected %s (HTTP %d)", action, resp.StatusCode)
+		// The local Unix-socket controller returns its own bounded reason, not
+		// upstream command output. Keep it so operators can act on the rejection.
+		reason := strings.TrimSpace(string(b))
+		if len(reason) > 1024 {
+			reason = reason[:1024]
+		}
+		return nil, fmt.Errorf("controller rejected %s (HTTP %d): %s", action, resp.StatusCode, reason)
 	}
 	return b, nil
 }
@@ -258,15 +272,18 @@ func (e *Engine) active(ctx context.Context) (string, Status, error) {
 func (e *Engine) wait(ctx context.Context, limit time.Duration, fn func() error) error {
 	deadline := time.NewTimer(limit)
 	defer deadline.Stop()
+	var last error
 	for {
 		if err := fn(); err == nil {
 			return nil
+		} else {
+			last = err
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return errors.New("operation deadline reached; state retained")
+			return fmt.Errorf("operation deadline reached; state retained: %w", last)
 		case <-time.After(time.Second):
 		}
 	}

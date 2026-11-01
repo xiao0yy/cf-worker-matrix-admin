@@ -83,7 +83,7 @@
 | `restore --point <完整快照ID> --sha256 <恢复点哈希>` | 恢复明确指定的不可变恢复点 |
 | `fence --instance <ID>` | 关闭入口并停止写者 |
 | `resume --instance <ID> --epoch <N>` | 在当前授权仍有效时显式恢复并开启备份 |
-| `source-resume --operation <ID> --instance <ID> --epoch <N>` | 交接未释放前显式撤销冻结，恢复旧 owner |
+| `source-resume --operation <ID> --instance <ID> --epoch <N>` | 归属未释放时先暂停并停止交接任务，再恢复旧 owner；不删除数据 |
 | `upgrade --from <新运行包目录>` | 检查代码升级条件 |
 | `upgrade --from <新运行包目录> --apply` | 更新本机运行程序与 units，保留身份、日志与数据 |
 
@@ -105,8 +105,10 @@ CLI 的 `control`、`mailbox`、`tasks` 是同一个程序的内部 systemd 入�
 - R2：控制状态、实例报告、配置胶囊、恢复点索引、B2 仓库凭据与密码。
 - B2：restic 数据库快照；媒体仍由 Tuwunel 原生 S3 保存，不重复备份。
 - 新程序直接读取明确支持的 recovery v2，不下载/执行快照生产者的旧程序。
-- 日常是两个数据库各自一致的在线快照；切换必须先停止全部写者，最终备份
-  完整回读并用隔离网络的容器验证数据库启动。
+- 日常是两个数据库各自一致的在线快照；切换先停止全部写者。备份程序完成
+  增量备份并返回 `backup_ready`；恢复程序准备好目标数据后返回 `restore_ready`。
+  集群只核对就绪凭据的操作、恢复点、目录与归属，不额外下载、扫描或验证数据库。
+  完整回读是显式维护任务，不是交接前置条件。
 - STARTING 后的数据可能已写入，失败时只修复当前 generation，不能再次覆盖恢复。
 - 强制接管须人工确认所有可能写入的旧实例已在 VPS 平台关机或完全隔离，
   选择固定恢复点并接受后续数据损失。控制器 CAS 获取新 epoch 后才恢复；
