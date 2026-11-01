@@ -14,7 +14,16 @@ import (
 // fenced by the controller. It creates no second copy of database bytes. A retry
 // may complete the same view, but cannot adopt different or additional files.
 // Cross-filesystem layouts fail explicitly instead of falling back to a copy.
-func LinkFrozenTree(ctx context.Context, src, dst string) error {
+// excludedDirectories names direct child directories owned by another storage
+// provider. They are never traversed; callers must establish that provider first.
+func LinkFrozenTree(ctx context.Context, src, dst string, excludedDirectories ...string) error {
+	excluded := make(map[string]bool, len(excludedDirectories))
+	for _, name := range excludedDirectories {
+		if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+			return errors.New("excluded directory must be a direct child name")
+		}
+		excluded[name] = true
+	}
 	if err := SafePath(src); err != nil {
 		return err
 	}
@@ -46,6 +55,9 @@ func LinkFrozenTree(ctx context.Context, src, dst string) error {
 		if err != nil {
 			return err
 		}
+		if excluded[rel] {
+			return fmt.Errorf("excluded directory %q is already staged; retain it and start a new backup operation", rel)
+		}
 		a, err := os.Lstat(filepath.Join(src, rel))
 		if err != nil {
 			return err
@@ -74,6 +86,12 @@ func LinkFrozenTree(ctx context.Context, src, dst string) error {
 		rel, err := filepath.Rel(src, p)
 		if err != nil {
 			return err
+		}
+		if excluded[rel] {
+			if !d.IsDir() {
+				return fmt.Errorf("excluded path %q must be a directory", rel)
+			}
+			return filepath.SkipDir
 		}
 		target := filepath.Join(dst, rel)
 		st, err := d.Info()

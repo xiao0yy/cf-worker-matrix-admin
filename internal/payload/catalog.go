@@ -183,7 +183,7 @@ func packConfiguration(bundle, output string) error {
 				return nil
 			}
 			if !configurationDirectory(rel) {
-				return errors.New("unclassified payload directory")
+				return fmt.Errorf("unclassified payload directory: %q", rel)
 			}
 			st, e := d.Info()
 			if e != nil {
@@ -194,7 +194,7 @@ func packConfiguration(bundle, output string) error {
 			return nil
 		}
 		if !d.Type().IsRegular() || !allowedPayload(rel) || entries[rel] == "" {
-			return errors.New("unclassified payload file")
+			return fmt.Errorf("unclassified payload file: %q", rel)
 		}
 		seen[rel] = true
 		if dataPath(rel) {

@@ -3,6 +3,7 @@ package payload
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
 	"io"
 	"os"
@@ -74,15 +75,18 @@ func VerifyInventory(bundle string) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 		name, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
+		if d.IsDir() {
+			if name == "." || name == "database" || name == "database/archive" || configurationDirectory(name) {
+				return nil
+			}
+			return fmt.Errorf("unclassified payload directory: %q", name)
+		}
 		if !d.Type().IsRegular() || entries[name] == "" {
-			return errors.New("unexpected staged payload file")
+			return fmt.Errorf("unexpected staged payload file: %q", name)
 		}
 		if !dataPath(name) {
 			content, err := boundedFile(path, 8<<20)

@@ -286,6 +286,17 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 	if c.mount("/var/lib/tuwunel") != data {
 		return errors.New("Tuwunel data mount differs")
 	}
+	// This recovery layout stores only the databases. Confirm media is entirely
+	// external before excluding the local media directory from a cold snapshot.
+	providers, err := c.env("TUWUNEL_MEDIA_STORAGE_PROVIDERS")
+	var mediaProviders []string
+	if err != nil || json.Unmarshal([]byte(providers), &mediaProviders) != nil || len(mediaProviders) != 1 || mediaProviders[0] != "media_s3" {
+		return errors.New("database-only backup requires TUWUNEL_MEDIA_STORAGE_PROVIDERS=[\"media_s3\"]")
+	}
+	mediaPrefix, err := c.env("TUWUNEL_STORAGE_PROVIDER__MEDIA_S3__S3__BASE_PATH")
+	if err != nil {
+		return err
+	}
 	if err = requireSpace(base, 1<<30); err != nil {
 		return err
 	}
@@ -296,7 +307,7 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 			return errors.New("final database view requires clean stop")
 		}
 		stamp = s.Final.Cutoff
-		if err = local.LinkFrozenTree(ctx, data, database); err != nil {
+		if err = local.LinkFrozenTree(ctx, data, database, "media"); err != nil {
 			return err
 		}
 		if err = e.action(ctx, "final-verify", op, s.Instance, s.Epoch); err != nil {
@@ -423,10 +434,6 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 	domain, err := c.env("TUWUNEL_SERVER_NAME")
 	if err != nil || !regexp.MustCompile(`^[a-zA-Z0-9.-]+$`).MatchString(domain) {
 		return errors.New("invalid Matrix server identity")
-	}
-	mediaPrefix, err := c.env("TUWUNEL_STORAGE_PROVIDER__MEDIA_S3__S3__BASE_PATH")
-	if err != nil {
-		return err
 	}
 	software, err := release.Current(e.ReleaseDir)
 	if err != nil {
