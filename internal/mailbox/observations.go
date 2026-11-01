@@ -96,6 +96,8 @@ func (p *Poller) observations(ctx context.Context, report map[string]any) {
 	report["management_protocol"] = management.Protocol
 	report["handover_receipt_schema"] = 2
 	report["handover_abort"] = true
+	report["durable_handover_abort"] = true
+	report["async_resume"] = true
 	report["force_takeover"] = true
 	report["public_address"] = p.publicAddress(ctx, report["host"].(map[string]any))
 	for name, path := range map[string]string{"preflight": filepath.Join(p.cfg.StateDir, "preflight.json"), "health": filepath.Join(p.foundation, "agent/health.json"), "handover_paused": filepath.Join(p.foundation, "agent/handover-paused.json"), "update": filepath.Join(p.foundation, "agent/pending-update.json")} {
@@ -112,6 +114,7 @@ func (p *Poller) observations(ctx context.Context, report map[string]any) {
 		return
 	}
 	var summaries []map[string]any
+	var recovery *management.Task
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -127,6 +130,13 @@ func (p *Poller) observations(ctx context.Context, report map[string]any) {
 		if !management.Terminal(t.State) {
 			summaries = append(summaries, map[string]any{"id": t.Request.ID, "action": t.Request.Action, "state": t.State, "stage": t.Stage, "updated_at": t.Updated})
 		}
+		if t.Request.Action == "rollback-handover" && (recovery == nil || t.Updated > recovery.Updated) {
+			copy := t
+			recovery = &copy
+		}
 	}
 	report["active_tasks"] = summaries
+	if recovery != nil {
+		report["handover_recovery"] = recovery
+	}
 }

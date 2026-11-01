@@ -84,8 +84,47 @@ func (c *Controller) observe(s State, err error) {
 	c.state = &s
 	c.journal.HighEpoch = s.Epoch
 	c.journal.HighRevision = s.Revision
+	// A rollback closes both participants. This is an authority receipt, not an
+	// inference from a healthy source or from a missing operation.
+	if t := c.journal.Target; t != nil && !t.MayWrite && s.Aborted != nil &&
+		s.Aborted.Phase == "ABORTED" && s.Aborted.ID == t.ID && s.Aborted.Source == t.Source &&
+		s.Aborted.Target == t.Target && s.Aborted.Epoch == t.Epoch && s.Aborted.Mode == t.Mode && s.Aborted.NextEpoch == t.NextEpoch && s.Epoch >= t.Epoch {
+		copy := *t
+		copy.Phase = "CANCELLED"
+		c.journal.Target = &copy
+	}
+	// A committed request cannot remain live when a newer authoritative ONLINE
+	// state has closed it. This also converges an offline standby which missed
+	// several aborts; last_aborted is presentation history, not the only proof.
+	if t := c.journal.Target; t != nil && !t.MayWrite && t.Phase == "REQUESTED" && s.Phase == "ONLINE" && s.Owner == t.Source && s.Epoch == t.Epoch && string(s.Operation) == "null" {
+		copy := *t
+		copy.Phase = "CANCELLED"
+		c.journal.Target = &copy
+	}
+	// A former writer returning after a completed takeover stays fenced, but
+	// can be prepared for a later handover. Preserve its data and MayWrite bit.
+	if s.Phase == "ONLINE" && s.Owner != c.cfg.Instance && s.Completed != nil && s.Completed.Target == s.Owner && s.Completed.NextEpoch == s.Epoch {
+		if t := c.journal.Target; t != nil && s.Epoch > t.NextEpoch {
+			copy := *t
+			copy.Phase = "RETIRED"
+			c.journal.Target = &copy
+		}
+		if f := c.journal.Final; f != nil && s.Epoch > f.Epoch {
+			copy := *f
+			copy.Phase = "RETIRED"
+			c.journal.Final = &copy
+		}
+	}
 	starting := c.journal.Target != nil && (c.journal.Target.Phase == "STARTING" || c.journal.Target.Phase == "COMMITTING") && s.Phase == "STARTING" && operationMatches(s.Operation, c.journal.Target.FinalOperation)
-	if s.Owner != c.cfg.Instance || s.Epoch != c.journal.BoundEpoch || (s.Phase != "ONLINE" && !starting) {
+	var requested FinalOperation
+	drainingRequest := s.Phase == "REQUESTED" && c.journal.Final == nil && json.Unmarshal(s.Operation, &requested) == nil && requested.Mode == "planned" && requested.Source == c.cfg.Instance && requested.Epoch == c.journal.BoundEpoch
+	if drainingRequest {
+		c.ready = false
+	}
+	// REQUESTED closes ingress through grantLocked without destroying the
+	// source's previous fence state. A cancelled unclaimed request can return
+	// to ONLINE; an already manual/stale fence must remain in place.
+	if s.Owner != c.cfg.Instance || s.Epoch != c.journal.BoundEpoch || (s.Phase != "ONLINE" && !starting && !drainingRequest) {
 		c.ready = false
 		c.deadline = time.Time{}
 		c.journal.Blocked = true
@@ -359,7 +398,7 @@ func (c *Controller) admin(w http.ResponseWriter, r *http.Request) {
 		err = c.fence("manual fence; explicit resume required")
 	case "/resume":
 		err = c.resume(r.Context(), request.Instance, request.Epoch)
-	case "/final-begin", "/final-stop", "/final-frozen", "/final-snapshot", "/final-complete", "/final-resume", "/final-verify":
+	case "/final-begin", "/final-begin-planned", "/final-stop", "/final-frozen", "/final-snapshot", "/final-complete", "/final-resume", "/final-verify":
 		err = c.finalAction(r.Context(), r.URL.Path, request.Instance, request.Epoch, request.Operation)
 	case "/maintenance-begin", "/maintenance-end":
 		err = c.maintenance(r.Context(), r.URL.Path, request.Operation, request.Instance, request.Epoch)

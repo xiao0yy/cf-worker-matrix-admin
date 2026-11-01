@@ -97,7 +97,7 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 			if j.Target.Phase != "REQUESTING" {
 				return errors.New("request was closed or superseded")
 			}
-		} else if j.Target != nil && j.Target.Phase != "ONLINE" && j.Target.Phase != "CANCELLED" {
+		} else if j.Target != nil && j.Target.Phase != "ONLINE" && j.Target.Phase != "CANCELLED" && j.Target.Phase != "RETIRED" {
 			return errors.New("another target operation is active")
 		}
 		if _, e := os.Stat(filepath.Join(c.cfg.StateDir, "handover", id, "request.json")); e == nil && (j.Target == nil || j.Target.ID != id) {
@@ -194,6 +194,9 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 		if s.Phase != "REQUESTED" || s.Owner != t.Source || !operationMatches(s.Operation, t.FinalOperation) {
 			return errors.New("source has claimed the operation; source final-resume is required before release")
 		}
+		closed := t.FinalOperation
+		closed.Phase, closed.ClosedAt = "ABORTED", c.now().UTC().Format(time.RFC3339Nano)
+		s.Aborted = &closed
 		if err = write("ONLINE", t.Source, epoch, nil); err != nil {
 			return err
 		}
@@ -248,6 +251,9 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 	if s.Owner != instance || s.Epoch != t.NextEpoch {
 		return errors.New("target no longer owns the expected epoch")
 	}
+	if action == "/handover-resume" && s.Phase == "VALIDATING" && t.Phase == "STARTING" && t.MayWrite {
+		action = "/handover-start"
+	}
 	switch action {
 	case "/handover-validating":
 		if s.Phase == "VALIDATING" {
@@ -269,10 +275,12 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 		}
 		return c.bindDeployment(ctx, copy)
 	case "/handover-start":
-		if s.Phase == "STARTING" && t.MayWrite {
-			return nil
+		if s.Phase == "STARTING" && j.Blocked {
+			return errors.New("target is fenced; explicit handover-resume is required")
 		}
-		if s.Phase != "VALIDATING" || t.Phase != "BOUND" || t.Root == "" || j.BoundEpoch != t.NextEpoch || t.MayWrite || busy {
+		initial := s.Phase == "VALIDATING" && t.Phase == "BOUND" && !t.MayWrite
+		retry := (s.Phase == "VALIDATING" || s.Phase == "STARTING") && t.Phase == "STARTING" && t.MayWrite
+		if (!initial && !retry) || t.Root == "" || j.Deployment != t.Root || j.BoundEpoch != t.NextEpoch || busy {
 			return errors.New("target is not durably bound and ready to start")
 		}
 		// Exclude an in-flight stop worker until the STARTING CAS is reconciled.
@@ -294,6 +302,12 @@ func (c *Controller) handoverAction(ctx context.Context, action, instance string
 		copy.MayWrite = true
 		if err = c.saveTarget(&copy, false); err != nil {
 			return err
+		}
+		// Local intent is committed first. A failed CAS must be retried against
+		// the SAME bound generation, never by replaying a restore or rebind.
+		if s.Phase == "STARTING" {
+			c.observe(s, nil)
+			return nil
 		}
 		op := remote
 		op.Phase = "STARTING"

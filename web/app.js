@@ -29,7 +29,7 @@ const actions = {
   ],
   "source-resume": [
     "中止交接并恢复源实例",
-    "仅限归属释放之前。新版会先停止切换任务，再恢复旧机；旧版需先暂停。恢复后取消目标等待请求，并将 Cloudflare 回源切回源实例。现有数据保留。",
+    "仅限归属释放之前。停止切换任务、记录撤销，再恢复旧机；新版目标会自动结束等待。服务恢复与 Cloudflare 回源是两个步骤，现有数据保留。",
   ],
 };
 Object.assign(
@@ -53,6 +53,8 @@ Object.assign(
       "task-retry": "重试任务",
       "handover-pause": "暂停切换推进",
       "handover-continue": "继续切换推进",
+      "rollback-handover": "撤销交接并恢复旧机",
+      "resume-owner": "恢复当前归属实例",
     }).map(([k, v]) => [k, [v, ""]]),
   ),
 );
@@ -931,6 +933,8 @@ function renderHandoverRecovery(model) {
       "handover-pause",
       "handover-continue",
       "cleanup-plan",
+      "task-cancel",
+      "task-retry",
     ].includes(choice.action);
     const why =
       choice.reason ||
@@ -944,7 +948,7 @@ function renderHandoverRecovery(model) {
     const control = button(
       choice.label,
       () => {
-        if (managed) window.Management.queue(choice.target, choice.action);
+        if (managed) window.Management.queue(choice.target, choice.action, choice.parameters || {});
         else {
           $("target").value = choice.target;
           openAction(choice.action);
@@ -1079,6 +1083,11 @@ function updateSwitchSubmit() {
     !$("route").checked ||
     $("switch-confirm").value !== "确认";
 }
+function sourceOperation(i) {
+  return i?.report?.final_backup || (i?.agent?.durable_handover_abort &&
+    snapshot?.control?.phase === "REQUESTED" && snapshot.control.operation?.source === i.id
+    ? snapshot.control.operation : null);
+}
 function makeCommand(i, action, expected = expectedState(), operation = "") {
   let source = 0;
   if (action === "handover-request") source = expected.epoch;
@@ -1086,7 +1095,7 @@ function makeCommand(i, action, expected = expectedState(), operation = "") {
     ["handover-resume", "handover-cancel", "source-resume"].includes(action)
   ) {
     const current =
-      action === "source-resume" ? i.report?.final_backup : i.report?.handover;
+      action === "source-resume" ? sourceOperation(i) : i.report?.handover;
     if (!current) throw new Error("此实例没有对应的操作。");
     operation = current.id;
     source = current.source_epoch;
@@ -1136,12 +1145,13 @@ function renderTools() {
     const action = node.dataset.action;
     if (!why && action.startsWith("handover-") && !i.report?.handover)
       why = "此实例没有目标切换任务。";
-    if (!why && action === "source-resume" && !i.report?.final_backup)
+    if (!why && action === "source-resume" && !sourceOperation(i))
       why = "此实例没有源备份任务。";
     if (!why && action === "source-resume" &&
       (i.id !== snapshot.control.owner ||
         i.report.bound_epoch !== snapshot.control.epoch ||
-        !["QUIESCING", "QUIESCED", "SNAPSHOTTING"].includes(snapshot.control.phase)))
+        (!["REQUESTED", "QUIESCING", "QUIESCED", "SNAPSHOTTING"].includes(snapshot.control.phase) &&
+          !(snapshot.control.phase === "ONLINE" && snapshot.control.last_aborted?.id === i.report?.final_backup?.id))))
       why = "源归属已释放或转移，不能直接恢复旧机。";
     if (!why && action === "source-resume" &&
       !i.agent?.handover_abort && !i.agent?.handover_paused)
@@ -1280,6 +1290,10 @@ function renderReceipt() {
     title = "指令通路检查通过";
     message = "实例已收到并处理这条检查指令，未启停服务。";
     tone = "good";
+  }
+  if (state === "APPLIED" && ["source-resume", "resume-local"].includes(lastCommand.action) && i?.agent?.async_resume) {
+    title = "恢复任务已接收";
+    message = "独立任务正在处理，请查看任务阶段与错误。指令回执不代表服务已经恢复，公网回源也不会自动修改。";
   }
   if (state === "APPLIED" && lastCommand.action.startsWith("handover")) {
     message =

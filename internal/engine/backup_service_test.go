@@ -10,6 +10,7 @@ import (
 
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/control"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
 )
 
 type readyBackup struct {
@@ -57,6 +58,7 @@ func TestSourceRollbackStopsWorkerBeforeAcquiringItsLock(t *testing.T) {
 	e := testEngine(t)
 	op := &control.FinalOperation{ID: "move-test", Source: "node-a", Epoch: 1, Phase: "SNAPSHOTTING"}
 	s := Status{Instance: "node-a", Epoch: 1, Blocked: true, Final: op, Control: &control.State{Owner: "node-a", Epoch: 1, Phase: "SNAPSHOTTING"}}
+	s.Control.Operation = release.JSON(op)
 	fakeController(t, e, &s, func(action string) error {
 		if action == "/final-resume" {
 			s.Final = nil
@@ -91,6 +93,9 @@ func TestSourceRollbackStopsWorkerBeforeAcquiringItsLock(t *testing.T) {
 	must(t, e.SourceResume(context.Background(), op.ID, s.Instance, 1))
 	if !s.Serving || s.Final != nil {
 		t.Fatal("source not resumed")
+	}
+	if _, err := os.Stat(filepath.Join(e.Host.Root, "agent/handover-paused.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("closed operation left a pause blocking the next move", err)
 	}
 }
 

@@ -39,6 +39,11 @@ window.Management = (() => {
     "prune-and-check": "回收存储并校验仓库",
     "retire-reviewed-snapshots": "删除计划内的旧恢复点",
     "remove-retired-local-data": "清理旧实例数据",
+    "stop-handover-worker": "停止交接任务",
+    "close-handover-authority": "记录撤销交接",
+    "wait-source-health": "等待旧机服务恢复",
+    "resume-backup-schedule": "恢复备份计划并结束撤销",
+    "resume-owner-and-wait-health": "恢复当前实例并等待健康检查",
   };
   const node = (tag, cls, value) => element(tag, cls, value);
   function blocker(i, action) {

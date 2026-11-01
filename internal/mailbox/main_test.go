@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/management"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,40 @@ type mem struct {
 	failFinal bool
 	loseFinal bool
 	beforePut func(string, []byte, string)
+}
+
+func TestResumeCommandsOnlyEnqueueAndLeaveMailboxResponsive(t *testing.T) {
+	for _, action := range []string{"source-resume", "resume-local"} {
+		t.Run(action, func(t *testing.T) {
+			root := t.TempDir()
+			_, run := runLocalBinary(filepath.Join(root, "deploy/control/local.json"), "/missing-must-not-execute")
+			c := Command{ID: "cmd-resume", Cluster: "test", Target: "node-a", Action: action, Bound: 2, SourceEpoch: 2, Operation: "move-test", Created: time.Now().UTC().Format(time.RFC3339), Expected: Expected{Revision: 5, Epoch: 2, Owner: "node-a", Phase: "ONLINE"}}
+			if action == "source-resume" {
+				c.Expected.Phase = "SNAPSHOTTING"
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := run(ctx, c, Status{}); err != nil {
+				t.Fatal(err)
+			}
+			task, err := management.Read(root, c.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if task.State != "QUEUED" {
+				t.Fatal("receipt pretended recovery completed")
+			}
+			if err = run(ctx, c, Status{}); err != nil {
+				t.Fatal("duplicate delivery not idempotent", err)
+			}
+			if err = run(ctx, Command{Action: "probe"}, Status{}); err != nil {
+				t.Fatal("mailbox blocked by queued recovery", err)
+			}
+			if err = management.Cancel(root, c.ID); err != nil {
+				t.Fatal("cannot cancel queued recovery", err)
+			}
+		})
+	}
 }
 
 func (m *mem) Get(_ context.Context, k string) ([]byte, string, error) {
@@ -284,5 +319,24 @@ func TestProbeHasNoSubprocess(t *testing.T) {
 	_, run := runLocal("/does-not-exist/local.json")
 	if e := run(context.Background(), Command{Action: "probe"}, Status{}); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestRollbackBeforeSourceWorkerStartsUsesAuthoritativeRequest(t *testing.T) {
+	p, m, c, calls := setup(t)
+	c.Action = "source-resume"
+	c.Expected.Owner = "B"
+	c.Expected.Phase = "REQUESTED"
+	c.Bound = 1
+	p.status = func(context.Context) (Status, error) {
+		return Status{Schema: 1, Cluster: "test", Instance: "B", Bound: 1}, nil
+	}
+	setCommand(t, p, m, c)
+	m.objects[p.prefix()+"control.json"] = []byte(`{"schema":1,"cluster_id":"test","revision":4,"epoch":1,"owner":"B","phase":"REQUESTED","operation":{"id":"move-one","source":"B","source_epoch":1}}`)
+	if err := p.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 1 || receipt(t, p, m, c.ID).State != "APPLIED" {
+		t.Fatal("could not cancel before the worker started", receipt(t, p, m, c.ID))
 	}
 }

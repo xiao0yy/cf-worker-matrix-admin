@@ -34,6 +34,7 @@ type Parameters struct {
 	Note         string   `json:"note,omitempty"`
 	AcceptLoss   bool     `json:"accept_data_loss,omitempty"`
 	Task         string   `json:"task_id,omitempty"`
+	Operation    string   `json:"operation_id,omitempty"`
 }
 type Request struct {
 	ID         string     `json:"id"`
@@ -57,7 +58,7 @@ type Task struct {
 	Result   any     `json:"result,omitempty"`
 }
 
-var Actions = []string{"preflight", "backup-now", "restore-drill", "upgrade-runtime", "refresh-config", "storage-plan", "storage-apply", "cleanup-plan", "cleanup-apply", "health-check", "confirm-delivery", "maintenance-recover", "force-takeover"}
+var Actions = []string{"preflight", "backup-now", "restore-drill", "upgrade-runtime", "refresh-config", "storage-plan", "storage-apply", "cleanup-plan", "cleanup-apply", "health-check", "confirm-delivery", "maintenance-recover", "force-takeover", "rollback-handover", "resume-owner"}
 
 func IsTask(s string) bool {
 	for _, a := range Actions {
@@ -86,6 +87,15 @@ func (r Request) Validate() error {
 	}
 	allowed := Parameters{}
 	switch r.Action {
+	case "rollback-handover":
+		if !local.SafeID(p.Operation) || strings.Contains(p.Operation, ".") || r.Expected.Owner != r.Target {
+			return errors.New("rollback requires the exact operation and source owner")
+		}
+		allowed.Operation = p.Operation
+	case "resume-owner":
+		if r.Expected.Owner != r.Target || r.Expected.Phase != "ONLINE" {
+			return errors.New("resume requires the ONLINE owner")
+		}
 	case "preflight", "restore-drill", "refresh-config":
 		allowed.Snapshot, allowed.PointHash = p.Snapshot, p.PointHash
 	case "confirm-delivery":

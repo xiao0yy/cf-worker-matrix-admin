@@ -117,16 +117,11 @@ window.Handover = (() => {
     const c = snapshot?.control;
     if (!c) return null;
     const aborted =
-      c.phase === "ONLINE" && !c.operation
-        ? snapshot.instances
-            .map((i) => i.report?.handover)
-            .find(
-              (op) =>
-                op?.mode === "planned" &&
-                ["REQUESTED", "CANCELLED"].includes(op.phase) &&
-                op.source === c.owner &&
-                op.source_epoch === c.epoch,
-            )
+      c.phase === "ONLINE" && !c.operation &&
+        c.last_aborted?.phase === "ABORTED" &&
+        c.last_aborted.source === c.owner &&
+        c.last_aborted.source_epoch === c.epoch
+        ? c.last_aborted
         : null;
     const completed = c.phase === "ONLINE" && !aborted;
     const op = aborted || (completed ? c.last_completed : c.operation);
@@ -159,7 +154,14 @@ window.Handover = (() => {
         "待确认",
         "待确认",
       ];
-    const worker = step < 3 || phase === "READY" ? source : target;
+    const worker = aborted || step < 3 || phase === "READY" ? source : target;
+    const candidateTask = source?.agent?.handover_recovery;
+    const recoveryTask = candidateTask?.request?.parameters?.operation_id === op.id &&
+      c.owner === op.source && c.epoch === op.source_epoch
+      ? candidateTask : null;
+    const recovering = recoveryTask && ["QUEUED", "RUNNING"].includes(recoveryTask.state);
+    const recoveryError = recoveryTask && ["FAILED", "INTERRUPTED", "CANCELLED"].includes(recoveryTask.state)
+      ? recoveryTask.error || "撤销任务已停止；数据保留，请查看当前阶段后重试。" : "";
     const stale =
       !statusValid ||
       !fresh(worker, "report", now) ||
@@ -178,7 +180,7 @@ window.Handover = (() => {
       currentErrors.length > 0 &&
       currentErrors.every((e) => Date.parse(progress.at) > Date.parse(e.at));
     const failure =
-      worker?.report?.error ||
+      recoveryError || worker?.report?.error ||
       worker?.agent?.error ||
       (!retrying && detail?.kind !== "interrupted" ? detail?.error : "") ||
       "";
@@ -207,6 +209,10 @@ window.Handover = (() => {
         ? "error"
         : stale
           ? "stale"
+          : recoveryError
+            ? "error"
+          : recovering
+            ? "recovering"
           : aborted
             ? "rolled-back"
             : failure
@@ -252,19 +258,23 @@ window.Handover = (() => {
       },
       storeStatus: forced ? "使用选定恢复点" : storeStatus,
       title:
-        mode === "paused"
+        mode === "recovering"
+          ? "正在撤销交接并恢复旧机"
+          : mode === "paused"
           ? "切换推进已暂停"
           : mode === "stale"
             ? "状态更新中断，等待新的报告"
             : mode === "error"
-              ? "交接需要检查"
+              ? recoveryError ? "撤销交接需要处理" : "交接需要检查"
               : mode === "awaiting"
                 ? "等待新实例的上线报告"
                 : retrying
                   ? "正在重试当前步骤"
                   : title,
       description:
-        mode === "paused"
+        mode === "recovering"
+          ? ({queued: "等待撤销任务开始。", "checking-authority": "核对源实例归属。", "stop-handover-worker": "停止交接任务，等待其退出。", "close-handover-authority": "提交撤销记录，让目标实例结束等待。", "wait-source-health": "等待旧机服务健康检查。", "resume-backup-schedule": "恢复备份计划并结束撤销。"}[recoveryTask.stage] || "正在处理撤销任务，轮询仍在更新。")
+          : mode === "paused"
           ? "保留当前阶段和数据，可在运维工具继续推进。"
           : mode === "stale"
             ? "以下是最后一次观测，动效已暂停。报告过期不代表实例已经停止。"
@@ -287,14 +297,18 @@ window.Handover = (() => {
       started: op.started_at,
       cutoff: op.cutoff_time,
       snapshot: op.recovery_set?.snapshot_id || "",
-      diagnostic: detail ? { ...detail, latest: currentErrors[0] } : null,
+      diagnostic: recoveryError
+        ? {step: recoveryTask.stage, at: recoveryTask.updated_at, error: recoveryError, kind: "failed"}
+        : detail ? { ...detail, latest: currentErrors[0] } : null,
       rolledBack: !!aborted,
+      recoveryTask,
       sourceId: op.source,
       targetId: op.target,
       raw: {
         control_phase: c.phase,
         operation: op,
         worker_errors: currentErrors,
+        recovery_task: recoveryTask,
       },
     };
   }
@@ -308,12 +322,22 @@ window.Handover = (() => {
     const actions = [];
     const add = (action, target, label, reason = "") =>
       actions.push({ action, target, label, reason });
+    if (model.recoveryTask && model.recoveryTask.state !== "SUCCEEDED") {
+      const running = ["QUEUED", "RUNNING"].includes(model.recoveryTask.state);
+      actions.push({action: running ? "task-cancel" : "task-retry", target: op.source,
+        label: running ? "暂停撤销任务" : "重试撤销任务", parameters: {task_id: model.recoveryTask.request.id}});
+      return { actions, note: "撤销任务独立执行，取消只停止后续步骤，不撤回已提交的归属记录。数据保留，可按原任务重试；公网回源不会自动修改。" };
+    }
     if (model.rolledBack) {
-      if (target?.report?.handover?.phase !== "CANCELLED")
+      if (source?.report?.final_backup?.id === op.id)
+        add("source-resume", op.source, "继续恢复旧机");
+      else if (source?.report?.blocked && !source.report.serving)
+        add("resume-local", op.source, "恢复旧机服务");
+      if (target?.report?.handover?.phase !== "CANCELLED" && !target?.agent?.durable_handover_abort)
         add("handover-cancel", op.target, "取消目标等待请求");
       return {
         actions,
-        note: "旧机数据保留。确认源实例恢复服务后，将 Cloudflare 回源切回源实例；页面无法替你确认入口已切回。再次迁移需要新的最终备份。",
+        note: "交接已撤销，目标实例会依据撤销记录结束等待。旧机数据保留；源实例健康与公网入口需要分别确认。需要恢复访问时将 Cloudflare 回源切回源实例，再次迁移会制作新的最终备份。",
       };
     }
     if (model.mode === "complete") {
@@ -336,7 +360,7 @@ window.Handover = (() => {
         worker.agent?.handover_paused ? "继续当前切换" : "暂停切换",
       );
     if (beforeRelease) {
-      if (source?.report?.final_backup?.id === op.id) {
+      if (source?.report?.final_backup?.id === op.id || source?.agent?.durable_handover_abort) {
         const reason =
           !source.agent?.handover_abort && !source.agent?.handover_paused
             ? "此实例需先暂停切换，才能撤销交接。"
@@ -457,6 +481,7 @@ window.Handover = (() => {
           "state",
           {
             running: next.forced ? "强制接管中" : "交接进行中",
+            recovering: "正在恢复旧机",
             paused: "已暂停推进",
             complete: "已确认上线",
             stale: "状态待确认",
@@ -485,7 +510,9 @@ window.Handover = (() => {
         );
         set(
           "stage-count",
-          next.rolledBack
+          next.mode === "recovering"
+            ? "撤销与恢复任务"
+            : next.rolledBack
             ? "本次交接已结束"
             : next.step < 0
             ? "阶段未知"
@@ -507,7 +534,7 @@ window.Handover = (() => {
         );
         fields.snapshot.title = next.snapshot;
         set("detail", JSON.stringify(next.raw, null, 2));
-        list.hidden = !!next.rolledBack;
+        list.hidden = !!next.rolledBack || next.mode === "recovering";
         for (const [index, item] of [...list.children].entries()) {
           item.hidden = !!next.forced && index < 4;
           item.lastElementChild.textContent =

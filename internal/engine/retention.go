@@ -269,30 +269,54 @@ func (e *Engine) cleanupCandidates(ctx context.Context) ([]string, uint64, error
 	}
 	paths := []string{}
 	var total uint64
-	dirs, err := os.ReadDir(filepath.Join(e.Host.Root, "generations"))
+	if err = e.registerDeployment(s); err != nil {
+		return nil, 0, err
+	}
+	entries, err := os.ReadDir(filepath.Join(e.Host.Root, "agent/generations"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, 0, err
 	}
-	for _, d := range dirs {
-		if !d.IsDir() || !strings.HasPrefix(d.Name(), "recovery-") {
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
 			continue
 		}
-		path := filepath.Join(e.Host.Root, "generations", d.Name())
-		if s.Epoch >= s.Control.Epoch && strings.HasPrefix(s.Deployment, path+"/") {
+		var g generation
+		path := filepath.Join(e.Host.Root, "agent/generations", ent.Name())
+		if err = local.ReadJSON(path, &g); err != nil {
+			return nil, 0, err
+		}
+		if err = e.validateGeneration(g); err != nil {
+			return nil, 0, err
+		}
+		if g.Instance != s.Instance || path != e.generationPath(g.Root) {
+			return nil, 0, errors.New("generation registry owner or key differs")
+		}
+		// Never delete an in-flight or possibly current writer, even if the
+		// generation was only partially bound when its process was interrupted.
+		if h := s.Handover; h != nil && h.Root == g.Root && h.Phase != "ONLINE" && h.Phase != "CANCELLED" && h.NextEpoch >= s.Control.Epoch {
 			continue
 		}
-		paths = append(paths, path)
-	}
-	// Only retired source databases are eligible; foundation config/identity and
-	// backup journals remain. A fresh standby never qualifies for these paths.
-	if s.Epoch > 0 && s.Epoch < s.Control.Epoch {
-		if s.Control.Completed == nil || s.Control.Completed.NextEpoch != s.Control.Epoch || s.Control.Completed.Receipt == nil {
-			return nil, 0, errors.New("completed replacement recovery receipt required")
+		if g.Epoch >= s.Control.Epoch {
+			continue
 		}
-		for _, path := range []string{"deploy/tuwunel/data", "deploy/telegram/data"} {
-			full := filepath.Join(e.Host.Root, path)
-			if _, er := os.Stat(full); er == nil {
-				paths = append(paths, full)
+		if g.Epoch != 0 {
+			c := s.Control.Completed
+			if c == nil || c.NextEpoch != s.Control.Epoch || c.Target != s.Control.Owner || c.Receipt == nil {
+				continue
+			}
+		}
+		if g.Root == s.Deployment && s.Epoch >= s.Control.Epoch {
+			continue
+		}
+		owned := []string{g.Work}
+		if g.Work == "" {
+			owned = []string{filepath.Join(g.Root, "deploy/tuwunel/data"), filepath.Join(g.Root, "deploy/telegram/data")}
+		}
+		for _, candidate := range owned {
+			if _, er := os.Lstat(candidate); er == nil {
+				paths = append(paths, candidate)
+			} else if !errors.Is(er, os.ErrNotExist) {
+				return nil, 0, er
 			}
 		}
 	}
@@ -310,6 +334,11 @@ func (e *Engine) cleanupCandidates(ctx context.Context) ([]string, uint64, error
 	return paths, total, nil
 }
 func (e *Engine) CleanupPlan(ctx context.Context, r management.Request) (any, error) {
+	unlock, err := local.Lock(filepath.Join(e.Host.Root, "agent/operation.lock"))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	paths, size, err := e.cleanupCandidates(ctx)
 	if err != nil {
 		return nil, err
@@ -343,6 +372,11 @@ func (e *Engine) CleanupApply(ctx context.Context, r management.Request) (any, e
 	if err != nil {
 		return nil, err
 	}
+	unlockProducers, err := e.lockGenerationProducers()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockProducers()
 	allow := map[string]bool{}
 	for _, v := range paths {
 		allow[v] = true

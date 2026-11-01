@@ -27,6 +27,8 @@ export const taskActions = new Set([
   "confirm-delivery",
   "maintenance-recover",
   "force-takeover",
+  "rollback-handover",
+  "resume-owner",
 ]);
 export const managementActions = new Set([
   ...taskActions,
@@ -42,6 +44,15 @@ export function validateParameters(c) {
     fail("任务参数必须是对象");
   let allowed = [];
   switch (c.action) {
+    case "rollback-handover":
+      allowed = ["operation_id"];
+      if (!id(p.operation_id) || c.expected?.owner !== c.target)
+        fail("撤销交接需要匹配操作编号和源实例");
+      break;
+    case "resume-owner":
+      if (c.expected?.owner !== c.target || c.expected?.phase !== "ONLINE")
+        fail("只能恢复当前 ONLINE 归属实例");
+      break;
     case "preflight":
     case "restore-drill":
     case "refresh-config":

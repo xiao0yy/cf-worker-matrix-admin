@@ -216,13 +216,14 @@ test("interventions follow ownership boundaries, not just an error badge", () =>
   );
 });
 
-test("rolled back handover keeps routing and pending target cancellation visible", () => {
+test("authoritative rollback keeps routing and legacy target cancellation visible", () => {
   const s = state("SNAPSHOTTING");
   const op = s.control.operation;
   s.control.phase = "ONLINE";
   s.control.operation = null;
   s.instances[0].report.serving = true;
   s.instances[1].report.handover = { ...op, phase: "REQUESTED" };
+  s.control.last_aborted = {...op, phase: "ABORTED"};
   const m = derive(s, true, now);
   assert.equal(m.mode, "rolled-back");
   assert.equal(m.source.status, "正在服务");
@@ -247,4 +248,38 @@ test("a newer running attempt keeps old diagnostics without showing the old fail
   assert.equal(m.flow, "upload");
   assert.match(m.title, /重试/);
   assert.equal(m.diagnostic.error, "no space left on device");
+});
+
+test("a stale target request cannot fabricate a rollback without authority", () => {
+  const s=state("SNAPSHOTTING"), op=s.control.operation;
+  s.control.phase="ONLINE";s.control.operation=null;
+  s.instances[1].report.handover={...op,phase:"REQUESTED"};
+  assert.equal(derive(s,true,now),null);
+});
+
+test("rollback tasks expose ongoing work, actual errors and the exact retry", () => {
+  const s=state("SNAPSHOTTING"), op=s.control.operation;
+  const task={request:{id:"job-rollback",action:"rollback-handover",parameters:{operation_id:op.id}},state:"RUNNING",stage:"stop-handover-worker"};
+  s.instances[0].agent.handover_recovery=task;
+  let m=derive(s,true,now);
+  assert.equal(m.mode,"recovering");assert.match(m.description,/停止交接任务/);
+  let plan=context.window.Handover.interventions(s,m);
+  assert.equal(plan.actions[0].action,"task-cancel");
+  assert.equal(plan.actions[0].parameters.task_id,"job-rollback");
+  s.control.last_aborted={...op,phase:"ABORTED"};s.control.phase="ONLINE";s.control.operation=null;
+  task.state="FAILED";task.error="systemctl: permission denied (private log: command-fixture.log)";
+  m=derive(s,true,now);plan=context.window.Handover.interventions(s,m);
+  assert.equal(m.mode,"error");assert.match(m.description,/permission denied/);
+  assert.equal(plan.actions[0].action,"task-retry");
+  task.state="SUCCEEDED";task.error="";
+  s.instances[1].agent.durable_handover_abort=true;
+  m=derive(s,true,now);plan=context.window.Handover.interventions(s,m);
+  assert.equal(m.mode,"rolled-back");assert.equal(plan.actions.length,0);
+});
+
+test("new participants use the source rollback task even before final backup begins", () => {
+ const s=state("REQUESTED");s.instances[0].agent.durable_handover_abort=true;s.instances[0].agent.handover_abort=true;
+ const m=derive(s,true,now), plan=context.window.Handover.interventions(s,m);
+ assert(plan.actions.some(a=>a.action==="source-resume"&&a.target==="a"));
+ assert(!plan.actions.some(a=>a.action==="handover-cancel"));
 });

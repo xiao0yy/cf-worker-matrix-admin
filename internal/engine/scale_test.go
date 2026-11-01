@@ -197,6 +197,17 @@ func testRestoreResume(t *testing.T, e *Engine, s *Status, repoDir, bin string, 
 	if again != result || transfers != 2 {
 		t.Fatal("completed restore replayed", transfers)
 	}
+	// Simulate death after removing temporary links but before publishing either
+	// ready receipt. The prepared generation must survive without any transfer.
+	must(t, os.Remove(filepath.Join(work, "result.json")))
+	must(t, os.Remove(filepath.Join(result.Root, "recovery-state/result.json")))
+	again, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work)
+	must(t, err)
+	afterPublish, err := os.Stat(filepath.Join(result.Root, "deploy/tuwunel/data/MANIFEST-1"))
+	must(t, err)
+	if again != result || transfers != 2 || !os.SameFile(after, afterPublish) {
+		t.Fatal("prepared generation was rebuilt or downloaded")
+	}
 	s.Handover = &control.TargetOperation{Root: result.Root}
 	if _, err = e.restoreAt(ctx, receipt.Snapshot, receipt.PointHash, work); err == nil {
 		t.Fatal("replayed bound generation")

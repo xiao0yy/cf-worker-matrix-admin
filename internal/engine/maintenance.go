@@ -259,12 +259,43 @@ func (e *Engine) PauseHandover(ctx context.Context, id string, pause bool) error
 	}
 	path := filepath.Join(e.Host.Root, "agent/handover-paused.json")
 	if pause {
-		return local.JSON(path, map[string]any{"at": e.stamp(), "reason": "operator paused progression"})
+		op := ""
+		if s.Control != nil {
+			var current control.FinalOperation
+			_ = json.Unmarshal(s.Control.Operation, &current)
+			op = current.ID
+		}
+		if op == "" && s.Final != nil && s.Final.Phase != "RETIRED" {
+			op = s.Final.ID
+		}
+		return local.JSON(path, map[string]any{"at": e.stamp(), "operation_id": op, "reason": "operator paused progression"})
 	}
 	if err = os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+func (e *Engine) clearOperationPause(op string) error {
+	path := filepath.Join(e.Host.Root, "agent/handover-paused.json")
+	var pause struct {
+		Operation string `json:"operation_id"`
+	}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err = json.Unmarshal(b, &pause); err != nil {
+		return err
+	}
+	// An idle/global operator pause, or a later operation's pause, stays intact.
+	if pause.Operation != op {
+		return nil
+	}
+	return os.Remove(path)
 }
 func (e *Engine) Health(ctx context.Context) (any, error) {
 	s, err := e.status(ctx)

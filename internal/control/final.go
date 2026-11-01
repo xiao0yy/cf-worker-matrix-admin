@@ -53,6 +53,7 @@ type FinalOperation struct {
 	Epoch     uint64        `json:"source_epoch"`
 	Phase     string        `json:"phase"`
 	StartedAt string        `json:"started_at"`
+	ClosedAt  string        `json:"closed_at,omitempty"`
 	Cutoff    string        `json:"cutoff_time,omitempty"`
 	Proof     []StopProof   `json:"stopped_proof,omitempty"`
 	Receipt   *FinalReceipt `json:"recovery_set,omitempty"`
@@ -175,7 +176,18 @@ func (c *Controller) finalAction(ctx context.Context, action, instance string, e
 		c.observe(state, nil)
 		return nil
 	}
+	if action == "/final-begin-planned" {
+		// A delayed worker from a cancelled request must never turn itself into
+		// a new standalone final backup just because the source is ONLINE again.
+		if remote.ID != id || remote.Mode != "planned" || (local == nil && state.Phase != "REQUESTED") {
+			return errors.New("planned handover was closed or superseded before final backup")
+		}
+		action = "/final-begin"
+	}
 	if action == "/final-begin" {
+		if state.Aborted != nil && state.Aborted.ID == id {
+			return errors.New("operation ID already closed")
+		}
 		if local == nil {
 			if _, e := os.Stat(filepath.Join(c.cfg.StateDir, "final", id, "closed.json")); !os.IsNotExist(e) {
 				return errors.New("operation ID already closed or cannot be inspected")
@@ -202,6 +214,16 @@ func (c *Controller) finalAction(ctx context.Context, action, instance string, e
 			return nil
 		}
 		return errors.New("begin acknowledgment cannot be reconciled")
+	}
+	// Rollback may arrive before the final worker has begun. Persist the same
+	// source intent so it follows the normal idempotent close path below.
+	if local == nil && action == "/final-resume" && state.Phase == "REQUESTED" && remote.Mode == "planned" {
+		op := remote
+		op.Phase = "RESUMING"
+		if err = c.saveFinal(&op); err != nil {
+			return err
+		}
+		local = &op
 	}
 	if local == nil {
 		if action == "/final-resume" && state.Phase == "ONLINE" && string(state.Operation) == "null" {
@@ -252,6 +274,9 @@ func (c *Controller) finalAction(ctx context.Context, action, instance string, e
 			if err = c.saveFinal(&op); err != nil {
 				return err
 			}
+			closed := op
+			closed.Phase, closed.ClosedAt = "ABORTED", c.now().UTC().Format(time.RFC3339Nano)
+			state.Aborted = &closed
 			if err = update("ONLINE", nil); err != nil {
 				return err
 			}

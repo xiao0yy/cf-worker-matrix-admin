@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/xiao0yy/cf-worker-matrix-admin/internal/control"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/management"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/release"
@@ -147,6 +148,14 @@ func (e *Engine) taskAuthority(ctx context.Context, r management.Request) error 
 		return errors.New("task instance identity or authority unavailable")
 	}
 	c := s.Control
+	if r.Action == "rollback-handover" && c.Owner == r.Target && c.Epoch == r.Expected.Epoch {
+		var current control.FinalOperation
+		_ = json.Unmarshal(c.Operation, &current)
+		if (current.ID == r.Parameters.Operation && current.Source == r.Target && current.Epoch == r.Expected.Epoch) ||
+			(c.Phase == "ONLINE" && c.Aborted != nil && c.Aborted.ID == r.Parameters.Operation && c.Aborted.Source == r.Target && c.Aborted.Epoch == r.Expected.Epoch) {
+			return nil
+		}
+	}
 	if c.Revision == r.Expected.Revision && c.Epoch == r.Expected.Epoch && c.Owner == r.Expected.Owner && c.Phase == r.Expected.Phase {
 		return nil
 	}
@@ -166,6 +175,11 @@ func (e *Engine) taskAuthority(ctx context.Context, r management.Request) error 
 func (e *Engine) executeTask(ctx context.Context, r management.Request) (any, error) {
 	p := r.Parameters
 	switch r.Action {
+	case "rollback-handover":
+		return nil, e.SourceResume(ctx, p.Operation, r.Target, r.Expected.Epoch)
+	case "resume-owner":
+		e.progress("resume-owner-and-wait-health")
+		return nil, e.Resume(ctx, r.Target, r.Expected.Epoch)
 	case "preflight":
 		return e.Preflight(ctx, p.Snapshot, p.PointHash)
 	case "refresh-config":

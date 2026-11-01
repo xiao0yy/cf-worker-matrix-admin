@@ -100,6 +100,24 @@ func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Re
 	if err = local.Atomic(filepath.Join(work, "point.json"), raw, 0600); err != nil {
 		return result, err
 	}
+	if err = e.registerGeneration(generation{Schema: 1, Cluster: e.Cluster, Instance: s.Instance, Root: filepath.Join(work, "rebuilt"), Work: work, Snapshot: point.Snapshot, Hash: local.Digest(raw)}); err != nil {
+		return result, err
+	}
+	// PREPARED is durable before discarding download/probe views. If publication
+	// fails after cleanup, retry publishes the existing generation without
+	// downloading, probing or replacing databases again.
+	prepared := filepath.Join(work, "prepared.json")
+	if _, er := os.Stat(prepared); er == nil {
+		if err = local.ReadJSON(prepared, &result); err != nil {
+			return result, err
+		}
+		if result.Work != work || result.Root != filepath.Join(work, "rebuilt") || result.Snapshot != point.Snapshot || result.Hash != local.Digest(raw) || result.Production || !result.Ready {
+			return result, errors.New("prepared generation differs")
+		}
+		return result, e.publishRestore(result, point)
+	} else if !errors.Is(er, os.ErrNotExist) {
+		return result, er
+	}
 	// Only this unbound generation's disposable views are rebuilt. The pinned
 	// restic download cache remains, so an interrupted transfer resumes in place.
 	for _, name := range []string{"bundle", "probe", "rebuilt"} {
@@ -162,18 +180,21 @@ func (e *Engine) restoreAt(ctx context.Context, snapshot, hash, work string) (Re
 			return result, err
 		}
 	}
-	if err = finishRestore(work); err != nil {
-		return result, err
-	}
-	proof := map[string]any{"schema": 1, "restore_ready": true, "snapshot_id": point.Snapshot, "point_sha256": local.Digest(raw), "deployment_root": root, "database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "consistency": point.Consistency, "media_included": false, "media_reused_from_s3": true}
-	if err = local.JSON(filepath.Join(root, "recovery-state/result.json"), proof); err != nil {
-		return result, err
-	}
 	result = Restored{1, point.Snapshot, local.Digest(raw), root, work, true, true, false, true}
-	if err = local.JSON(filepath.Join(work, "result.json"), result); err != nil {
+	if err = local.JSON(prepared, result); err != nil {
 		return result, err
 	}
-	return result, finishRestore(work)
+	return result, e.publishRestore(result, point)
+}
+func (e *Engine) publishRestore(result Restored, point Point) error {
+	if err := finishRestore(result.Work); err != nil {
+		return err
+	}
+	proof := map[string]any{"schema": 1, "restore_ready": true, "snapshot_id": result.Snapshot, "point_sha256": result.Hash, "deployment_root": result.Root, "database_startup_verified": true, "telegram_database_startup_verified": true, "production_started": false, "consistency": point.Consistency, "media_included": false, "media_reused_from_s3": true}
+	if err := local.JSON(filepath.Join(result.Root, "recovery-state/result.json"), proof); err != nil {
+		return err
+	}
+	return local.JSON(filepath.Join(result.Work, "result.json"), result)
 }
 func finishRestore(work string) error {
 	// Remove cache/probe links before the generation can be admitted as a writer.

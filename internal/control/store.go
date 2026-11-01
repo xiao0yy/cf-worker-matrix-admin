@@ -28,6 +28,7 @@ type State struct {
 	Phase     string          `json:"phase"`
 	Operation json.RawMessage `json:"operation"`
 	Completed *FinalOperation `json:"last_completed,omitempty"`
+	Aborted   *FinalOperation `json:"last_aborted,omitempty"`
 }
 
 func (s State) validate(cluster string) error {

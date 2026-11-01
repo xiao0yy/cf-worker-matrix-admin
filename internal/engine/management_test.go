@@ -173,6 +173,7 @@ func TestCleanupChecksReplacementAndRetainsIdentity(t *testing.T) {
 	})
 	data := filepath.Join(e.Host.Root, "generations/recovery-old/data")
 	write(t, data, "old data")
+	must(t, e.registerGeneration(generation{Schema: 1, Cluster: e.Cluster, Instance: s.Instance, Root: filepath.Join(e.Host.Root, "generations/recovery-old/rebuilt"), Work: filepath.Join(e.Host.Root, "generations/recovery-old"), Snapshot: strings.Repeat("a", 64), Hash: strings.Repeat("b", 64)}))
 	identity := filepath.Join(e.Host.Root, "deploy/control/state/identity.json")
 	write(t, identity, "preserve")
 	req := taskRequest(e, "cleanup-plan")

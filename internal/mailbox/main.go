@@ -366,6 +366,10 @@ func (p *Poller) poll(ctx context.Context) error {
 		Schema  int    `json:"schema"`
 		Cluster string `json:"cluster_id"`
 		Expected
+		Operation *struct {
+			Op
+			Source string `json:"source"`
+		} `json:"operation"`
 	}
 	if json.Unmarshal(control, &authority) != nil || authority.Schema != 1 || authority.Cluster != p.cfg.Cluster || authority.Expected != c.Expected {
 		return finish("REJECTED", errors.New("authority changed; refresh before submitting a new command"))
@@ -384,6 +388,9 @@ func (p *Poller) poll(ctx context.Context) error {
 		op := st.Handover
 		if c.Action == "source-resume" {
 			op = st.Final
+			if op == nil && authority.Phase == "REQUESTED" && authority.Owner == c.Target && authority.Operation != nil && authority.Operation.Source == c.Target {
+				op = &authority.Operation.Op
+			}
 		}
 		if op == nil || op.ID != c.Operation || op.Epoch != c.SourceEpoch {
 			return finish("REJECTED", errors.New("local operation identity mismatch"))
@@ -557,16 +564,19 @@ func runLocalBinary(configPath, bin string) (func(context.Context) (Status, erro
 			args = append(args, "--operation-id", c.Operation)
 		}
 		if c.Action == "source-resume" || c.Action == "resume-local" {
+			// A receipt acknowledges durable acceptance, not service recovery.
+			// The independent task worker owns the long-running action and error.
+			r := taskRequest(c)
+			r.Action = "resume-owner"
 			if c.Action == "source-resume" {
-				args = []string{"source-resume", "--root", pRoot(base), "--operation", c.Operation, "--instance", c.Target, "--epoch", fmt.Sprint(c.SourceEpoch)}
-			} else {
-				args = []string{"resume", "--root", pRoot(base), "--instance", c.Target, "--epoch", fmt.Sprint(c.Bound)}
+				if c.SourceEpoch != c.Expected.Epoch {
+					return errors.New("rollback source epoch mismatch")
+				}
+				r.Action, r.Parameters.Operation = "rollback-handover", c.Operation
+			} else if c.Bound != c.Expected.Epoch {
+				return errors.New("resume epoch mismatch")
 			}
-			cmd := exec.CommandContext(ctx, bin, args...)
-			if _, e := cmd.Output(); e != nil {
-				return errors.New("resume failed or interrupted; inspect instance and worker error before retrying")
-			}
-			return nil
+			return management.Enqueue(pRoot(base), r)
 		}
 		_, e := command(ctx, args)
 		return e
