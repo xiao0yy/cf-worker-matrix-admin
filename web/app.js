@@ -1692,9 +1692,19 @@ $("progress-tools").onclick = () => {
   navigate("tools");
 };
 $("handover-new").onclick = () => {
-  dismissedHandover = snapshot?.control.last_completed?.id || "";
+  const model = window.Handover.derive(snapshot, currentStatus());
+  if (!["complete", "rolled-back"].includes(model?.mode)) {
+    renderSwitch();
+    return;
+  }
+  // Dismiss the terminal operation actually on screen, including an abort
+  // after an older successful handover. Keep the control history untouched.
+  dismissedHandover = model.id;
+  switchTarget = "";
   resetReview();
   renderSwitch();
+  $("switch-title").focus();
+  $("switch-title").scrollIntoView({ block: "start" });
 };
 $("handover-demo-open").onclick = () => {
   stopDemo();

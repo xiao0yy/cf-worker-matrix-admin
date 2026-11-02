@@ -247,6 +247,89 @@ test("switch wizard requires a target, route acknowledgement, typed confirmation
   assert.equal(writes, 0);
 });
 
+test("preparing the next handover leaves the displayed terminal operation and survives polling", async (t) => {
+  for (const outcome of ["completed", "aborted", "aborted-after-completion"]) {
+    await t.test(outcome, async () => {
+      const state = fixture(), writes = [];
+      const completed = {
+        id: "move-completed", mode: "planned", phase: "ONLINE",
+        source: "node-b", target: "node-a", source_epoch: 0, next_epoch: 1,
+      };
+      const aborted = {
+        id: "move-aborted", mode: "planned", phase: "ABORTED",
+        source: "node-a", target: "node-b", source_epoch: 1, next_epoch: 2,
+      };
+      if (outcome !== "aborted") state.control.last_completed = completed;
+      if (outcome !== "completed") state.control.last_aborted = aborted;
+      const c = browser(async (path, options) => {
+        if (options.method !== "GET") writes.push({ path, body: options.body });
+        return Response.json(state);
+      });
+      setSnapshot(c, state);
+      evaluate(c, 'navigate("switch")');
+      const node = (id) => c.document.getElementById(id);
+      assert.equal(node("switch-active").hidden, false);
+      assert.equal(node("handover-new").hidden, false);
+      // An earlier attempt must not supply the new target or acknowledgements.
+      review(c);
+      node("handover-new").click();
+      assert.equal(node("switch-active").hidden, true);
+      assert.equal(node("switch-wizard").hidden, false);
+      assert.equal(node("switch-choose").hidden, false);
+      assert.equal(node("switch-review").hidden, true);
+      assert.equal(node("switch-next").disabled, true);
+      assert.equal(node("route").checked, false);
+      assert.equal(node("switch-confirm").value, "");
+      assert.equal(c.document.activeElement.id, "switch-title");
+      assert.deepEqual(clone(evaluate(c, "snapshot.control")), state.control);
+      await evaluate(c, "refresh()");
+      assert.equal(node("switch-wizard").hidden, false);
+      const radio = c.document.querySelector('input[name="switch-target"][value="node-b"]');
+      radio.checked = true;
+      radio.onchange();
+      node("switch-next").click();
+      const newOperation = evaluate(c, "reviewContext.operation");
+      assert.notEqual(newOperation, aborted.id);
+      assert.notEqual(newOperation, completed.id);
+      await evaluate(c, "refresh()");
+      assert.equal(node("switch-review").hidden, false);
+      assert.equal(node("switch-submit").disabled, true);
+      assert.equal(writes.length, 0);
+      // A new live operation always replaces the dismissed historical view.
+      state.control.phase = "REQUESTED";
+      state.control.operation = { ...aborted, id: newOperation, phase: "REQUESTED" };
+      await evaluate(c, "refresh()");
+      assert.equal(node("switch-active").hidden, false);
+      assert.equal(node("switch-wizard").hidden, true);
+      assert.equal(node("handover-new").hidden, true);
+    });
+  }
+});
+
+test("a next-handover click rechecks status rather than dismissing stale or active work", () => {
+  const c = browser(), state = fixture();
+  state.control.last_completed = {
+    id: "move-completed", mode: "planned", phase: "ONLINE",
+    source: "node-b", target: "node-a", source_epoch: 0, next_epoch: 1,
+  };
+  state.control.last_aborted = {
+    id: "move-aborted", mode: "planned", phase: "ABORTED",
+    source: "node-a", target: "node-b", source_epoch: 1, next_epoch: 2,
+  };
+  setSnapshot(c, state);
+  evaluate(c, 'navigate("switch");statusFetchedAt=0');
+  c.document.getElementById("handover-new").click();
+  assert.equal(c.document.getElementById("switch-active").hidden, false);
+  assert.equal(c.document.getElementById("handover-new").hidden, true);
+  assert.equal(evaluate(c, "dismissedHandover"), "");
+  state.control.phase = "REQUESTED";
+  state.control.operation = { ...state.control.last_aborted, id: "move-new", phase: "REQUESTED" };
+  setSnapshot(c, state);
+  c.document.getElementById("handover-new").click();
+  assert.equal(c.document.getElementById("switch-active").hidden, false);
+  assert.equal(evaluate(c, "dismissedHandover"), "");
+});
+
 test("switch command carries exact state and uncertain delivery retries the identical command", async () => {
   const state = fixture(),
     writes = [];
