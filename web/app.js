@@ -775,26 +775,45 @@ function switchAvailability(i) {
     });
   return { label: "可作为目标", reason: "" };
 }
+function isHandoverHistory(model) {
+  const c = snapshot?.control;
+  return !!model && c?.phase === "ONLINE" && !c.operation &&
+    ["ONLINE", "ROLLED_BACK"].includes(model.phase) &&
+    (!model.recoveryTask || model.recoveryTask.state === "SUCCEEDED");
+}
 function renderSwitch() {
   const c = snapshot?.control;
   const model = window.Handover.derive(snapshot, currentStatus());
+  const historical = isHandoverHistory(model);
+  const operationKey = `${c?.cluster_id || ""}:${model?.id || ""}:${historical}`;
+  if (observedHandover !== operationKey) {
+    observedHandover = operationKey;
+    expandedHandover = "";
+    switchTarget = "";
+    resetReview();
+  }
+  // Ended operations are history on every page load. Only an explicit local
+  // inspection opens them; no dismiss flag or persisted browser state is needed.
+  const active = !!model && (!historical || expandedHandover === model.id);
   text(
     "switch-intro",
-    model?.forced
+    active && model?.forced
       ? "从选定备份恢复；旧写入实例须先在 VPS 平台关闭或完全隔离。"
       : "先完成旧实例的最终备份，再让新实例接管服务。",
   );
-  const active =
-    !!model && (c.phase !== "ONLINE" || dismissedHandover !== model.id);
   const demo = !$("handover-demo").hidden;
+  $("handover-history").hidden = !historical || active || demo;
+  if (historical) text(
+    "handover-history-summary",
+    (model.rolledBack ? "上次交接已撤销" : "上次交接已完成") +
+      " · " + model.source.name + " → " + model.target.name,
+  );
   $("switch-active").hidden = !active || demo;
   $("switch-wizard").hidden = active || demo;
+  $("handover-new").hidden = !historical;
   if (active) {
     liveHandover.render(model);
     renderHandoverRecovery(model);
-    $("handover-new").hidden = !["complete", "rolled-back"].includes(
-      model.mode,
-    );
     text(
       "progress-note",
       model.mode === "complete"
@@ -965,7 +984,8 @@ function renderHandoverRecovery(model) {
   });
   replaceContent($("handover-recovery-actions"), controls);
 }
-let dismissedHandover = "",
+let expandedHandover = "",
+  observedHandover = "",
   demoTimer = null,
   demoPlaying = false;
 const liveHandover = window.Handover.create($("handover-live-view"));
@@ -1691,15 +1711,24 @@ $("progress-tools").onclick = () => {
   renderTools();
   navigate("tools");
 };
-$("handover-new").onclick = () => {
+$("handover-history-open").onclick = () => {
   const model = window.Handover.derive(snapshot, currentStatus());
-  if (!["complete", "rolled-back"].includes(model?.mode)) {
+  if (!isHandoverHistory(model)) {
     renderSwitch();
     return;
   }
-  // Dismiss the terminal operation actually on screen, including an abort
-  // after an older successful handover. Keep the control history untouched.
-  dismissedHandover = model.id;
+  expandedHandover = model.id;
+  renderSwitch();
+  $("switch-title").focus();
+  $("switch-title").scrollIntoView({ block: "start" });
+};
+$("handover-new").onclick = () => {
+  const model = window.Handover.derive(snapshot, currentStatus());
+  if (!isHandoverHistory(model)) {
+    renderSwitch();
+    return;
+  }
+  expandedHandover = "";
   switchTarget = "";
   resetReview();
   renderSwitch();

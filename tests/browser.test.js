@@ -247,7 +247,7 @@ test("switch wizard requires a target, route acknowledgement, typed confirmation
   assert.equal(writes, 0);
 });
 
-test("preparing the next handover leaves the displayed terminal operation and survives polling", async (t) => {
+test("ended handovers default to target selection on every page load and remain inspectable", async (t) => {
   for (const outcome of ["completed", "aborted", "aborted-after-completion"]) {
     await t.test(outcome, async () => {
       const state = fixture(), writes = [];
@@ -268,6 +268,16 @@ test("preparing the next handover leaves the displayed terminal operation and su
       setSnapshot(c, state);
       evaluate(c, 'navigate("switch")');
       const node = (id) => c.document.getElementById(id);
+      assert.equal(node("switch-active").hidden, true);
+      assert.equal(node("switch-wizard").hidden, false);
+      assert.equal(node("handover-history").hidden, false);
+      assert.match(node("handover-history-summary").textContent, outcome === "completed" ? /已完成/ : /已撤销/);
+      // A second browser has no dismiss flag, yet still opens target selection.
+      const reopened = browser();
+      setSnapshot(reopened, state);
+      evaluate(reopened, 'navigate("switch")');
+      assert.equal(reopened.document.getElementById("switch-wizard").hidden, false);
+      node("handover-history-open").click();
       assert.equal(node("switch-active").hidden, false);
       assert.equal(node("handover-new").hidden, false);
       // An earlier attempt must not supply the new target or acknowledgements.
@@ -295,18 +305,20 @@ test("preparing the next handover leaves the displayed terminal operation and su
       assert.equal(node("switch-review").hidden, false);
       assert.equal(node("switch-submit").disabled, true);
       assert.equal(writes.length, 0);
-      // A new live operation always replaces the dismissed historical view.
+      // A new live operation always replaces the historical view and old review.
       state.control.phase = "REQUESTED";
       state.control.operation = { ...aborted, id: newOperation, phase: "REQUESTED" };
       await evaluate(c, "refresh()");
       assert.equal(node("switch-active").hidden, false);
       assert.equal(node("switch-wizard").hidden, true);
       assert.equal(node("handover-new").hidden, true);
+      assert.equal(node("handover-history").hidden, true);
+      assert.equal(evaluate(c, "reviewContext"), null);
     });
   }
 });
 
-test("a next-handover click rechecks status rather than dismissing stale or active work", () => {
+test("stale history is inspectable without trapping selection, but active work cannot be dismissed", () => {
   const c = browser(), state = fixture();
   state.control.last_completed = {
     id: "move-completed", mode: "planned", phase: "ONLINE",
@@ -317,17 +329,42 @@ test("a next-handover click rechecks status rather than dismissing stale or acti
     source: "node-a", target: "node-b", source_epoch: 1, next_epoch: 2,
   };
   setSnapshot(c, state);
-  evaluate(c, 'navigate("switch");statusFetchedAt=0');
-  c.document.getElementById("handover-new").click();
+  evaluate(c, 'navigate("switch");statusFetchedAt=0;renderSwitch()');
+  assert.equal(c.document.getElementById("switch-wizard").hidden, false);
+  assert.equal(c.document.querySelector('input[name="switch-target"]').disabled, true);
+  c.document.getElementById("handover-history-open").click();
   assert.equal(c.document.getElementById("switch-active").hidden, false);
-  assert.equal(c.document.getElementById("handover-new").hidden, true);
-  assert.equal(evaluate(c, "dismissedHandover"), "");
+  c.document.getElementById("handover-new").click();
+  assert.equal(c.document.getElementById("switch-wizard").hidden, false);
   state.control.phase = "REQUESTED";
   state.control.operation = { ...state.control.last_aborted, id: "move-new", phase: "REQUESTED" };
   setSnapshot(c, state);
   c.document.getElementById("handover-new").click();
   assert.equal(c.document.getElementById("switch-active").hidden, false);
-  assert.equal(evaluate(c, "dismissedHandover"), "");
+  assert.equal(c.document.getElementById("handover-new").hidden, true);
+});
+
+test("rollback work remains prominent until recovery finishes, then becomes history", () => {
+  const c = browser(), state = fixture();
+  state.control.last_aborted = {
+    id: "move-aborted", mode: "planned", phase: "ABORTED",
+    source: "node-a", target: "node-b", source_epoch: 1, next_epoch: 2,
+  };
+  const task = {
+    request: { id: "task-rollback", parameters: { operation_id: "move-aborted" } },
+    state: "RUNNING", stage: "wait-source-health",
+  };
+  state.instances[0].agent.handover_recovery = task;
+  for (const stage of ["RUNNING", "FAILED", "INTERRUPTED", "CANCELLED"]) {
+    task.state = stage;
+    setSnapshot(c, state);
+    assert.equal(c.document.getElementById("switch-active").hidden, false);
+    assert.equal(c.document.getElementById("handover-history").hidden, true);
+  }
+  task.state = "SUCCEEDED";
+  setSnapshot(c, state);
+  assert.equal(c.document.getElementById("switch-wizard").hidden, false);
+  assert.equal(c.document.getElementById("handover-history").hidden, false);
 });
 
 test("switch command carries exact state and uncertain delivery retries the identical command", async () => {

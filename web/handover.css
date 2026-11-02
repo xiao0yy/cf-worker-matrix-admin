@@ -1,5 +1,19 @@
 /* One motion surface: the source, recovery point and destination keep their
    positions while the observed protocol moves work and ownership between them. */
+.handover-history {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+.handover-history p {
+  overflow-wrap: anywhere;
+}
 .handover-scene {
   --handover-accent: var(--accent);
 
