@@ -1442,11 +1442,11 @@ function detailList(entries) {
   return list;
 }
 function rawDetails(label, value) {
-  const details = element("details", "technical");
-  details.append(
-    element("summary", "", label),
-    element("pre", "", JSON.stringify(value, null, 2)),
-  );
+  const details = element("details", "technical"),
+    record = element("pre", "", JSON.stringify(value, null, 2));
+  record.tabIndex = 0;
+  record.setAttribute("aria-label", label);
+  details.append(element("summary", "", label), record);
   return details;
 }
 function openInstance(id, edit = false) {
@@ -1528,17 +1528,79 @@ async function saveInstanceInfo() {
     $("instance-info-save").disabled = false;
   }
 }
+function backupBytes(value) {
+  if (!Number.isSafeInteger(value) || value < 0) return "未记录";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })} ${units[unit]}`;
+}
+function backupDuration(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0)
+    return "未记录";
+  if (seconds < 1) return "不足 1 秒";
+  const total = Math.floor(seconds),
+    hours = Math.floor(total / 3600),
+    minutes = Math.floor((total % 3600) / 60),
+    rest = total % 60;
+  return [
+    hours && `${hours} 小时`,
+    minutes && `${minutes} 分钟`,
+    rest && `${rest} 秒`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+function backupFiles(stats) {
+  const values = [
+    stats?.files_total,
+    stats?.files_new,
+    stats?.files_changed,
+    stats?.files_unmodified,
+  ];
+  if (!values.every((n) => Number.isSafeInteger(n) && n >= 0)) return "未记录";
+  const [total, added, changed, unchanged] = values.map((n) =>
+    n.toLocaleString("zh-CN"),
+  );
+  return `${total} 个（新增 ${added} · 修改 ${changed} · 未变化 ${unchanged}）`;
+}
 function openBackup() {
   const source = backupSource(),
-    b = source?.agent?.backup_observation;
+    b = source?.agent?.backup_observation,
+    stats =
+      b?.statistics?.schema === 1 && b.statistics.snapshot_id === b.snapshot_id
+        ? b.statistics
+        : null;
   if (!b) return;
+  const metrics = detailList([
+    ["快照大小", backupBytes(stats?.logical_bytes)],
+    ["新增存储量", backupBytes(stats?.added_packed_bytes)],
+    ["备份耗时", backupDuration(stats?.duration_seconds)],
+  ]);
+  metrics.classList.add("backup-statistics");
+  const statsTime = (value) =>
+    value && Number.isFinite(Date.parse(value)) ? time(value) : "未记录";
   const note = b.database_startup_verified
     ? "此记录包含数据库启动校验结果。"
     : "此记录未包含数据库启动校验，文件校验通过不等同于完成恢复演练。";
   $("backup-detail").replaceChildren(
+    metrics,
+    element(
+      "p",
+      "small muted",
+      stats
+        ? "快照大小为数据库原始大小；新增存储已去重、压缩，不代表仓库总占用。耗时仅含 restic 备份阶段。"
+        : "这条备份记录没有大小与耗时统计。节点升级后，新完成的备份会自动上报。",
+    ),
     detailList([
       ["来源实例", instanceName(source)],
       ["数据时间", time(b.data_time)],
+      ["备份开始", statsTime(stats?.started_at)],
+      ["备份完成", statsTime(stats?.finished_at)],
+      ["文件数量", backupFiles(stats)],
       ["校验时间", time(b.verified_at)],
       ["校验范围", backupVerification(b)],
       ["Telegram", b.telegram_included ? "已包含" : "未确认包含"],

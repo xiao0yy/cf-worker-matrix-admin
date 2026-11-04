@@ -490,7 +490,7 @@ func (p *Poller) report(ctx context.Context, err error) error {
 			var v map[string]any
 			if json.Unmarshal(b, &v) == nil {
 				summary := map[string]any{}
-				for _, k := range []string{"snapshot_id", "data_time", "verification", "database_startup_verified", "consistency", "media_included", "telegram_included", "verified_at", "instance_control"} {
+				for _, k := range []string{"snapshot_id", "data_time", "verification", "database_startup_verified", "consistency", "media_included", "telegram_included", "verified_at", "instance_control", "statistics"} {
 					if x, ok := v[k]; ok {
 						summary[k] = x
 					}

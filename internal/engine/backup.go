@@ -167,7 +167,8 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 			return err
 		}
 		var snapshots []struct {
-			ID string `json:"id"`
+			ID      string          `json:"id"`
+			Summary json.RawMessage `json:"summary"`
 		}
 		if json.Unmarshal(b, &snapshots) != nil || len(snapshots) > 1 {
 			return errors.New("ambiguous snapshot history")
@@ -188,6 +189,7 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 			return errors.New("snapshot full ID unavailable")
 		}
 		job.Snapshot = snapshots[0].ID
+		saveBackupStatistics(pending, job.Snapshot, snapshots[0].Summary)
 		if err = local.JSON(jobfile, job); err != nil {
 			return err
 		}
@@ -256,6 +258,9 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 		return err
 	}
 	success := map[string]any{"snapshot_id": job.Snapshot, "verified_at": job.VerifiedAt, "verification": point.Verification, "data_time": meta.Time, "consistency": meta.Consistency, "instance_control": meta.Binding, "telegram_included": true, "media_included": false, "database_startup_verified": job.Startup, "repository_id": job.Repository.ID}
+	if stats := readBackupStatistics(pending, job.Snapshot); stats != nil {
+		success["statistics"] = stats
+	}
 	if err = local.JSON(filepath.Join(base, "last-success.json"), success); err != nil {
 		return err
 	}

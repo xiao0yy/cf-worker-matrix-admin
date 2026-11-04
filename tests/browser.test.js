@@ -198,6 +198,49 @@ test("overview separates backup file verification from a restore and startup tes
   assert.equal(c.document.getElementById("page-tools").hidden, true);
 });
 
+test("backup details show logical size and a real zero increment without fetching data", () => {
+  const c = browser(() => { throw Error("backup details must use the existing report"); });
+  const state = fixture(), backup = state.instances[0].agent.backup_observation;
+  backup.statistics = {
+    schema: 1, snapshot_id: backup.snapshot_id,
+    logical_bytes: 2 ** 40, added_packed_bytes: 0, duration_seconds: 72.5,
+    started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:01:12.5Z",
+    files_total: 1250, files_new: 0, files_changed: 0, files_unmodified: 1250,
+  };
+  setSnapshot(c, state);
+  evaluate(c, "openBackup()");
+  const detail = c.document.getElementById("backup-detail");
+  const metrics = [...detail.querySelectorAll(".backup-statistics dd")].map((x) => x.textContent);
+  assert.deepEqual(metrics, ["1 TiB", "0 B", "1 分钟 12 秒"]);
+  assert.match(detail.textContent, /1,250 个（新增 0 · 修改 0 · 未变化 1,250）/);
+  assert.match(detail.textContent, /不代表仓库总占用/);
+  assert.match(detail.textContent, /耗时仅含 restic 备份阶段/);
+});
+
+test("old or mismatched backup statistics stay unknown, never zero or from another snapshot", () => {
+  for (const stats of [undefined, {schema: 2}, {schema: 1, snapshot_id: "b".repeat(64), logical_bytes: 123}]) {
+    const c = browser(), state = fixture();
+    state.instances[0].agent.backup_observation.statistics = stats;
+    setSnapshot(c, state);
+    evaluate(c, "openBackup()");
+    const detail = c.document.getElementById("backup-detail");
+    assert.deepEqual([...detail.querySelectorAll(".backup-statistics dd")].map((x) => x.textContent), ["未记录", "未记录", "未记录"]);
+    assert.match(detail.textContent, /节点升级后/);
+  }
+});
+
+test("backup metrics handle fractional duration, large units and invalid numeric reports", () => {
+  const c = browser();
+  for (const value of [null, undefined, "123", -1, Infinity, NaN, 2 ** 53]) {
+    c.value = value;
+    assert.equal(evaluate(c, "backupBytes(value)"), "未记录");
+  }
+  assert.equal(evaluate(c, "backupBytes(3.25 * 2 ** 30)"), "3.25 GiB");
+  assert.equal(evaluate(c, "backupDuration(0.2)"), "不足 1 秒");
+  assert.equal(evaluate(c, "backupDuration(3661)"), "1 小时 1 分钟 1 秒");
+  assert.equal(evaluate(c, "backupDuration(null)"), "未记录");
+});
+
 test("stale report, wrong ownership and failed refresh cannot display a healthy service or enable a switch", async () => {
   const c = browser(async () => {
     throw new Error("network unavailable");

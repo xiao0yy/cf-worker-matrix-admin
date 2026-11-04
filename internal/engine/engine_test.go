@@ -798,6 +798,14 @@ func testBackupRetry(t *testing.T, final bool) {
 	if !first.Verified || !local.SHA.MatchString(first.Snapshot) {
 		t.Fatal("retry checkpoint missing")
 	}
+	statistics := readBackupStatistics(pending, first.Snapshot)
+	dbSize, err := treeSize(filepath.Join(bundle, "payload/database"))
+	must(t, err)
+	telegram, err := os.Stat(filepath.Join(bundle, "payload/telegram/data/telegram.db"))
+	must(t, err)
+	if statistics == nil || statistics.LogicalBytes != dbSize+uint64(telegram.Size()) || statistics.AddedPackedBytes == 0 || statistics.FilesTotal == 0 || statistics.DurationSeconds <= 0 {
+		t.Fatalf("restic statistics do not describe the database backup: %+v", statistics)
+	}
 	objects.failLatest = false
 	objects.failPoints = false
 	must(t, backup())
@@ -814,11 +822,15 @@ func testBackupRetry(t *testing.T, final bool) {
 	b, err = os.ReadFile(success)
 	must(t, err)
 	var done struct {
-		Snapshot string `json:"snapshot_id"`
+		Snapshot   string            `json:"snapshot_id"`
+		Statistics *BackupStatistics `json:"statistics"`
 	}
 	must(t, json.Unmarshal(b, &done))
 	if done.Snapshot != first.Snapshot {
 		t.Fatal("wrong success receipt")
+	}
+	if done.Statistics == nil || *done.Statistics != *statistics {
+		t.Fatal("retry lost or replaced the original backup statistics")
 	}
 	if final {
 		var receipt control.FinalReceipt
