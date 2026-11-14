@@ -460,6 +460,7 @@ window.Management = (() => {
     );
   }
   function renderPlans(i) {
+    renderBackupCleanup(i);
     const rows = catalog.tasks
       .filter(
         (t) =>
@@ -507,6 +508,31 @@ window.Management = (() => {
       $("cleanup-plans"),
       rows.length ? rows : [node("p", "empty-state", "生成计划不会删除数据。")],
     );
+  }
+  function renderBackupCleanup(i) {
+    const report = i?.agent?.backup_cleanup;
+    const rows = [];
+    if (!report) {
+      rows.push(node("p", "empty-state", "尚无自动回收报告；旧版实例需升级后才能上报。"));
+    } else {
+      const stale = !i.agent_fresh || !Number.isFinite(Date.parse(report.checked_at)) || Date.now() - Date.parse(report.checked_at) > 120000;
+      rows.push(node("p", "small muted", `上次检查：${time(report.checked_at)}${stale ? " · 报告已过期，当前回收状态未知" : ""}`));
+      if (report.state === "BUSY") rows.push(node("p", "small muted", "实例正在执行任务，结束后自动检查临时文件。"));
+      if (report.error) rows.push(node("p", "target-error", report.error));
+      const labels = {RUNNING: "执行中", RETRY_PENDING: "暂时保留", CLEANUP_PENDING: "等待回收", CLEANED: "已回收", UNTRACKED: "需要核实"};
+      for (const item of report.items || []) {
+        const row = node("div", "maintenance-row"), copy = node("div", "maintenance-copy");
+        copy.append(node("strong", "", `${item.operation_id ? "交接备份" : "定时或手动备份"} · ${labels[item.state] || "未知状态"}`));
+        if (item.operation_id) copy.append(node("span", "small muted", item.operation_id));
+        if (item.reason) copy.append(node("span", "small muted", item.reason));
+        if (item.state === "RETRY_PENDING" && !item.operation_id && item.retry_until) copy.append(node("span", "small muted", `保留至 ${time(item.retry_until)}；重试不会延长保留期。`));
+        if (item.error) copy.append(node("p", "target-error", item.error + (item.state === "CLEANUP_PENDING" ? "。排除占用或权限问题后，实例会自动重试回收。" : "")));
+        row.append(copy); rows.push(row);
+      }
+      if (!report.items?.length && report.state === "OK") rows.push(node("p", "small muted", "没有已登记的备份临时文件需要回收。"));
+      if (report.omitted > 0) rows.push(node("p", "small muted", `另有 ${report.omitted} 条记录保存在实例本地；此处优先显示待处理记录。`));
+    }
+    replaceContent($("backup-cleanup"), rows);
   }
   async function openTakeover() {
     await load(true);

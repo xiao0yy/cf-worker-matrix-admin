@@ -500,6 +500,12 @@ func (p *Poller) report(ctx context.Context, err error) error {
 		}
 	}
 	p.observations(ctx, report)
+	if b, er := os.ReadFile(filepath.Join(p.foundation, "agent/backup-cleanup.json")); er == nil && len(b) < 65536 {
+		var v map[string]any
+		if json.Unmarshal(b, &v) == nil {
+			report["backup_cleanup"] = v
+		}
+	}
 	b, _ := json.Marshal(report)
 	return p.store.Put(ctx, p.prefix()+"agents/"+p.cfg.Instance+".json", b, "")
 }

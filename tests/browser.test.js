@@ -719,6 +719,30 @@ test('maintenance shows unsupported nodes instead of pretending remote upgrade e
  assert.match(ctx.document.getElementById('management-capability').textContent,/先由 Agent 升级/);
  assert.equal(ctx.document.getElementById('runtime-upgrade').disabled,true);
 });
+test('backup scratch cleanup shows retention, blocked deletion, stale and missing reports', () => {
+  const ctx = browser(), data = fixture();
+  setSnapshot(ctx, data);
+  vm.runInContext(readFileSync(new URL('../web/management.js', import.meta.url), 'utf8'), ctx);
+  evaluate(ctx, 'window.Management.selectTab("storage")');
+  const view = ctx.document.getElementById('backup-cleanup');
+  assert.match(view.textContent, /尚无自动回收报告/);
+  data.instances[0].agent.backup_cleanup = {
+    checked_at: new Date().toISOString(), state: 'BLOCKED', items: [
+      {state:'RETRY_PENDING', retry_until:new Date(Date.now()+86400000).toISOString(), reason:'保留供重试，到期自动回收'},
+      {state:'CLEANUP_PENDING', operation_id:'move-fixture', error:'进程仍使用临时数据'},
+    ],
+  };
+  setSnapshot(ctx, data);
+  evaluate(ctx, 'window.Management.render()');
+  assert.match(view.textContent, /重试不会延长保留期/);
+  assert.match(view.textContent, /move-fixture/);
+  assert.match(view.textContent, /进程仍使用临时数据/);
+  assert.match(view.textContent, /自动重试回收/);
+  data.instances[0].agent.backup_cleanup.checked_at = '2020-01-01T00:00:00Z';
+  setSnapshot(ctx, data);
+  evaluate(ctx, 'window.Management.render()');
+  assert.match(view.textContent, /报告已过期/);
+});
 test('merely viewing runtime versions never submits an upgrade command',async()=>{
  const calls=[];const data=fixture();for(const i of data.instances){i.agent.management_protocol=1;i.agent.actions=['upgrade-runtime'];i.report.blocked=!i.report.serving;}
  const ctx=browser(async(path)=>{calls.push(path);return Response.json(path==='/api/status'?data:path==='/api/releases'?{releases:[{version:'0.3.0',manifest_sha256:'a'.repeat(64)}]}:{points:[],tasks:[]});});

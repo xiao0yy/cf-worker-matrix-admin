@@ -23,11 +23,17 @@ func TestReportPublishesBackupStatisticsWithItsSnapshot(t *testing.T) {
 	if err := writeJSON(filepath.Join(p.foundation, "backup-state/tuwunel-restic/last-success.json"), map[string]any{"snapshot_id": strings.Repeat("a", 64), "statistics": stats, "private_field": "must not be reported"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := writeJSON(filepath.Join(p.foundation, "agent/backup-cleanup.json"), map[string]any{"schema": 1, "state": "BLOCKED", "items": []map[string]string{{"state": "CLEANUP_PENDING", "error": "process still using scratch"}}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := p.report(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	var report struct {
-		Backup map[string]json.RawMessage `json:"backup_observation"`
+		Backup  map[string]json.RawMessage `json:"backup_observation"`
+		Cleanup struct {
+			State string `json:"state"`
+		} `json:"backup_cleanup"`
 	}
 	if err := json.Unmarshal(store.objects[p.prefix()+"agents/"+p.cfg.Instance+".json"], &report); err != nil {
 		t.Fatal(err)
@@ -35,6 +41,9 @@ func TestReportPublishesBackupStatisticsWithItsSnapshot(t *testing.T) {
 	want, _ := json.Marshal(stats)
 	if string(report.Backup["statistics"]) != string(want) || report.Backup["private_field"] != nil {
 		t.Fatal("statistics missing or private fields leaked")
+	}
+	if report.Cleanup.State != "BLOCKED" {
+		t.Fatal("cleanup failure was not reported")
 	}
 }
 

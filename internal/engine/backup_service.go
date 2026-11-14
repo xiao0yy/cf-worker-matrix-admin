@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/control"
 	"github.com/xiao0yy/cf-worker-matrix-admin/internal/local"
@@ -33,8 +34,19 @@ func (b nativeBackupService) Final(ctx context.Context, root, op string) (contro
 	state := filepath.Join(root, "backup-state/tuwunel-restic")
 	checkpoint := filepath.Join(root, "deploy/tuwunel/data/checkpoint-restic")
 	if _, err := os.Stat(checkpoint); err == nil {
-		if _, err = os.Stat(filepath.Join(state, "preparing/request.json")); err != nil {
+		s, er := b.e.permit(ctx, op, nil)
+		if er != nil {
+			return receipt, er
+		}
+		if _, er = b.e.beginBackupWorkspace(root, op, s); er != nil {
+			return receipt, er
+		}
+		var req checkpointRequest
+		if err = local.ReadJSON(filepath.Join(state, "preparing/request.json"), &req); err != nil || req.Container.ID == "" || req.Container.mount("/var/lib/tuwunel") != filepath.Join(root, "deploy/tuwunel/data") {
 			return receipt, errors.New("unclassified interrupted checkpoint; source retained")
+		}
+		if _, err = time.Parse(time.RFC3339Nano, req.At); err != nil {
+			return receipt, err
 		}
 		dst := filepath.Join(state, "finals", op, "interrupted-checkpoint")
 		if err = os.MkdirAll(filepath.Dir(dst), 0700); err != nil {

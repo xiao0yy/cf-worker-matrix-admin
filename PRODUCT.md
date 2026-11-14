@@ -25,7 +25,7 @@ Cloudflare Access protects the web console. The Worker reads reports and submits
 - Destructive storage or retired-instance cleanup always starts with a reviewed, expiring plan; media remains untouched.
 - DNS editing is available only when configured; manual routing remains supported.
 - Stale reports do not prove a machine is stopped. Command acceptance is not service completion. A successful handover requires matching ownership, generation and a fresh serving report.
-- No automatic failover, automatic updates or unreviewed cleanup. No fabricated backup history, throughput, uptime or message-delivery claims. Container health and a time-bounded operator delivery confirmation are separate facts.
+- No automatic failover, automatic updates or unreviewed deletion of deployments/remote backups. Owned backup scratch is reclaimed automatically after publication, after handover closure, or after a 24-hour ordinary backup retry window. Unknown directories require inspection. No fabricated backup history, throughput, uptime or message-delivery claims. Container health and a time-bounded operator delivery confirmation are separate facts.
 - Public code and examples must contain no deployment addresses, account identifiers, bucket names or secrets.
 - UI work must not mutate production services or send test messages.
 

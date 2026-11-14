@@ -27,6 +27,13 @@ func (e *Engine) Tasks(ctx context.Context) error {
 	if err = e.connect(); err != nil {
 		return err
 	}
+	// The timer keeps reclaiming scratch even when backups fail or handovers
+	// are paused. Failure is reported separately and never blocks management.
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		_ = e.SweepBackupScratch(cleanup)
+	}()
 	_ = e.Observe(ctx)
 	entries, err := os.ReadDir(management.Directory(e.Host.Root))
 	if err != nil {

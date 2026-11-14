@@ -85,7 +85,7 @@ func (e *Engine) Backup(ctx context.Context, full bool) (err error) {
 	}()
 	return e.backup(ctx, root, "", full)
 }
-func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
+func (e *Engine) backup(ctx context.Context, root, op string, full bool) (result error) {
 	e.progress("prepare-backup")
 	s, err := e.permit(ctx, op, nil)
 	if err != nil {
@@ -100,6 +100,11 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 	if err = os.MkdirAll(base, 0700); err != nil {
 		return err
 	}
+	workspace, err := e.beginBackupWorkspace(root, op, s)
+	if err != nil {
+		return err
+	}
+	defer func() { e.finishBackupWorkspace(root, workspace, result) }()
 	pending := filepath.Join(base, "pending")
 	if _, err = os.Stat(pending); errors.Is(err, os.ErrNotExist) {
 		if err = e.stage(ctx, root, base, op, s); err != nil {
@@ -274,8 +279,34 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) error {
 			return err
 		}
 	}
-	return os.RemoveAll(pending)
+	return nil
 }
+
+type checkpointRequest struct {
+	At        string    `json:"at"`
+	Container Container `json:"container"`
+}
+
+func (e *Engine) checkpointComplete(ctx context.Context, req checkpointRequest) error {
+	after, err := e.inspect(ctx, "tuwunel")
+	if err != nil {
+		return err
+	}
+	if !sameContainer(req.Container, after) {
+		return errors.New("Tuwunel restarted during checkpoint")
+	}
+	logs, err := e.docker(ctx, "logs", "--since", req.At, "--tail", "2000", req.Container.ID)
+	if err != nil {
+		return err
+	}
+	text := regexp.MustCompile(`\x1b\[[0-9;]*[[:alpha:]]`).ReplaceAllString(string(logs), "")
+	text = strings.NewReplacer("\n", " ", "\r", " ").Replace(text)
+	if !regexp.MustCompile("Created checkpoint at[[:space:]`]+/var/lib/tuwunel/checkpoint-restic[`]?\\.").MatchString(text) {
+		return errors.New("checkpoint not complete")
+	}
+	return nil
+}
+
 func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) error {
 	preparing := filepath.Join(base, "preparing")
 	bundle := filepath.Join(preparing, "bundle")
@@ -320,10 +351,7 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 		}
 	} else {
 		request := filepath.Join(preparing, "request.json")
-		var req struct {
-			At        string    `json:"at"`
-			Container Container `json:"container"`
-		}
+		var req checkpointRequest
 		if _, err = os.Stat(request); errors.Is(err, os.ErrNotExist) {
 			if !c.State.Running || c.State.Restarting {
 				return errors.New("Tuwunel not running")
@@ -354,25 +382,7 @@ func (e *Engine) stage(ctx context.Context, root, base, op string, s Status) err
 		}
 		stamp = req.At
 		if _, err = os.Stat(database); errors.Is(err, os.ErrNotExist) {
-			if err = e.wait(ctx, 5*time.Minute, func() error {
-				after, err := e.inspect(ctx, "tuwunel")
-				if err != nil {
-					return err
-				}
-				if !sameContainer(req.Container, after) {
-					return errors.New("Tuwunel restarted during checkpoint")
-				}
-				logs, err := e.docker(ctx, "logs", "--since", req.At, "--tail", "2000", req.Container.ID)
-				if err != nil {
-					return err
-				}
-				text := regexp.MustCompile(`\x1b\[[0-9;]*[[:alpha:]]`).ReplaceAllString(string(logs), "")
-				text = strings.NewReplacer("\n", " ", "\r", " ").Replace(text)
-				if !regexp.MustCompile("Created checkpoint at[[:space:]`]+/var/lib/tuwunel/checkpoint-restic[`]?\\.").MatchString(text) {
-					return errors.New("checkpoint not complete")
-				}
-				return nil
-			}); err != nil {
+			if err = e.wait(ctx, 5*time.Minute, func() error { return e.checkpointComplete(ctx, req) }); err != nil {
 				return err
 			}
 			if err = os.Rename(filepath.Join(data, "checkpoint-restic"), database); err != nil {
