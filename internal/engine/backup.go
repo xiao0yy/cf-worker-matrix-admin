@@ -100,11 +100,20 @@ func (e *Engine) backup(ctx context.Context, root, op string, full bool) (result
 	if err = os.MkdirAll(base, 0700); err != nil {
 		return err
 	}
+	lease, err := lockBackupScratch(root)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	ctx = context.WithValue(ctx, backupProcessLock{}, lease)
 	workspace, err := e.beginBackupWorkspace(root, op, s)
 	if err != nil {
 		return err
 	}
-	defer func() { e.finishBackupWorkspace(root, workspace, result) }()
+	defer func() {
+		_ = lease.Close()
+		e.finishBackupWorkspace(root, workspace, result)
+	}()
 	pending := filepath.Join(base, "pending")
 	if _, err = os.Stat(pending); errors.Is(err, os.ErrNotExist) {
 		if err = e.stage(ctx, root, base, op, s); err != nil {

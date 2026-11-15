@@ -18,6 +18,33 @@ import (
 
 const backupRetryRetention = 24 * time.Hour
 
+type backupProcessLock struct{}
+
+// The same open file description is inherited by backup subprocesses. Close,
+// never LOCK_UN: a child that outlives its parent must retain the lease until it
+// exits. Both a new producer and the sweeper require this exclusive lock.
+func lockBackupScratch(root string) (*os.File, error) {
+	path := filepath.Join(backupBase(root, ""), "readers.lock")
+	if err := local.SafePath(path); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errors.New("备份子进程仍持有临时数据使用锁，结束后自动重试")
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
 // This journal owns only scratch data, never a deployment or remote snapshot.
 // It is durable BEFORE staging begins and survives both deletion and SIGKILL.
 type backupWorkspace struct {
@@ -180,6 +207,11 @@ func (e *Engine) cleanBackupWorkspace(ctx context.Context, root, base string, w 
 }
 
 func (e *Engine) removeBackupScratch(ctx context.Context, root, base string, w *backupWorkspace) error {
+	lease, err := lockBackupScratch(root)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
 	paths := []string{filepath.Join(base, "preparing"), filepath.Join(base, "pending"), filepath.Join(base, "interrupted-checkpoint")}
 	// A checkpoint can outlive the backup process that sent USR2. Do not race
 	// Tuwunel's asynchronous producer or lose its request/identity evidence.
@@ -224,7 +256,7 @@ func (e *Engine) removeBackupScratch(ctx context.Context, root, base string, w *
 		// Delete the checkpoint before deleting its original request record.
 		paths = append([]string{filepath.Join(root, "deploy/tuwunel/data/checkpoint-restic")}, paths...)
 	}
-	if err := scratchUnused(ctx, paths); err != nil {
+	if err := scratchUnmounted(ctx, paths); err != nil {
 		return err
 	}
 	for _, path := range paths {
@@ -241,9 +273,10 @@ func (e *Engine) removeBackupScratch(ctx context.Context, root, base string, w *
 	return nil
 }
 
-// Check process/mount references, not database contents. This also catches a
-// restic child left alive by a kill of a manually launched parent process.
-func scratchUnused(ctx context.Context, paths []string) error {
+// Process use is covered by the inherited lease, not a host-wide /proc scan.
+// Unrelated protected processes must not prevent cleanup. Mounts still require
+// an explicit check because RemoveAll must never recurse into mounted data.
+func scratchUnmounted(ctx context.Context, paths []string) error {
 	inside := func(path string) bool {
 		for _, root := range paths {
 			if path == root || strings.HasPrefix(path, root+"/") {
@@ -258,51 +291,12 @@ func scratchUnused(ctx context.Context, paths []string) error {
 	}
 	unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
 	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) > 4 && inside(unescape.Replace(f[4])) {
-			return errors.New("临时目录含挂载点，拒绝自动清理")
-		}
-	}
-	procs, err := os.ReadDir("/proc")
-	if err != nil {
-		return err
-	}
-	for _, p := range procs {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !p.IsDir() || p.Name()[0] < '0' || p.Name()[0] > '9' {
-			continue
-		}
-		// Scratch parents are private (0700). Other unprivileged users cannot
-		// open them; procfs may legitimately hide their descriptors from us.
-		info, er := p.Info()
-		if errors.Is(er, os.ErrNotExist) {
-			continue
-		}
-		if er != nil {
-			return er
-		}
-		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != uint32(os.Geteuid()) {
-			continue
-		}
-		base := filepath.Join("/proc", p.Name())
-		refs := []string{filepath.Join(base, "cwd"), filepath.Join(base, "root")}
-		fds, er := os.ReadDir(filepath.Join(base, "fd"))
-		if er != nil && !errors.Is(er, os.ErrNotExist) {
-			return fmt.Errorf("无法确认进程 %s 是否仍使用临时数据：%w", p.Name(), er)
-		}
-		for _, fd := range fds {
-			refs = append(refs, filepath.Join(base, "fd", fd.Name()))
-		}
-		for _, ref := range refs {
-			target, er := os.Readlink(ref)
-			if er == nil && inside(strings.TrimSuffix(target, " (deleted)")) {
-				return fmt.Errorf("进程 %s 仍使用临时数据，稍后自动重试", p.Name())
-			}
-			if er != nil && !errors.Is(er, os.ErrNotExist) && !errors.Is(er, syscall.EINVAL) && !errors.Is(er, syscall.ESRCH) {
-				return er
-			}
+		f := strings.Fields(line)
+		if len(f) > 4 && inside(unescape.Replace(f[4])) {
+			return errors.New("临时目录含挂载点，拒绝自动清理")
 		}
 	}
 	return nil

@@ -31,6 +31,13 @@ func (e *Engine) backupService() BackupService {
 
 func (b nativeBackupService) Final(ctx context.Context, root, op string) (control.FinalReceipt, error) {
 	var receipt control.FinalReceipt
+	// A prior backup's child may survive its parent and still use the original
+	// checkpoint. Do not move it until that child's inherited lease is gone.
+	lease, err := lockBackupScratch(root)
+	if err != nil {
+		return receipt, err
+	}
+	defer lease.Close()
 	state := filepath.Join(root, "backup-state/tuwunel-restic")
 	checkpoint := filepath.Join(root, "deploy/tuwunel/data/checkpoint-restic")
 	if _, err := os.Stat(checkpoint); err == nil {
@@ -58,6 +65,9 @@ func (b nativeBackupService) Final(ctx context.Context, root, op string) (contro
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return receipt, err
 	}
+	// The caller retains operation.lock across this preparation and backup.
+	// backup acquires a new lease that it propagates to its own subprocesses.
+	_ = lease.Close()
 	published := filepath.Join(state, "finals", op, "published.json")
 	if _, err := os.Stat(published); errors.Is(err, os.ErrNotExist) {
 		if err = b.e.backup(ctx, root, op, false); err != nil {
@@ -66,7 +76,7 @@ func (b nativeBackupService) Final(ctx context.Context, root, op string) (contro
 	} else if err != nil {
 		return receipt, err
 	}
-	err := local.ReadJSON(published, &receipt)
+	err = local.ReadJSON(published, &receipt)
 	return receipt, err
 }
 

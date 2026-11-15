@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -144,13 +146,17 @@ func TestScratchRecoveryHonorsProducerAndOrphanProcess(t *testing.T) {
 	must(t, err)
 	e.Now = func() time.Time { return when }
 	// An orphan subprocess can outlive its parent and still read this data.
+	lease, err := lockBackupScratch(e.Host.Root)
+	must(t, err)
 	child := exec.Command("sleep", "60")
 	child.Dir = filepath.Join(base, "pending")
+	child.ExtraFiles = []*os.File{lease}
 	must(t, child.Start())
 	defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
+	must(t, lease.Close()) // Equivalent to the parent's descriptors closing on death.
 	must(t, e.SweepBackupScratch(ctx))
 	w := workspaceRead(t, base)
-	if w.State != "CLEANUP_PENDING" || !strings.Contains(w.Error, "仍使用临时数据") {
+	if w.State != "CLEANUP_PENDING" || !strings.Contains(w.Error, "仍持有临时数据使用锁") {
 		t.Fatalf("in-use scratch not protected: %+v", w)
 	}
 	must(t, child.Process.Kill())
@@ -240,15 +246,15 @@ func TestScratchWaitsForAsynchronousCheckpointProducer(t *testing.T) {
 		t.Fatal("producer proof lost")
 	}
 	complete = true
-	// Hold the completed checkpoint open to interrupt deletion after its
-	// ownership decision has been persisted, then lose the original logs.
-	file, err := os.Open(filepath.Join(checkpoint, "part.sst"))
-	must(t, err)
+	// An unsafe path interrupts deletion after the checkpoint decision has
+	// been persisted. The retry must not require the original Docker logs.
+	pending := filepath.Join(base, "pending")
+	must(t, os.Symlink(t.TempDir(), pending))
 	must(t, e.SweepBackupScratch(context.Background()))
 	if got := workspaceRead(t, base); got.Checkpoint != "remove" || got.State != "CLEANUP_PENDING" {
 		t.Fatalf("cleanup proof not durable: %+v", got)
 	}
-	must(t, file.Close())
+	must(t, os.Remove(pending))
 	complete = false
 	e.Runner = runFunc(func(context.Context, Command) ([]byte, error) { return nil, errors.New("producer logs rotated") })
 	must(t, e.SweepBackupScratch(context.Background()))
@@ -257,4 +263,104 @@ func TestScratchWaitsForAsynchronousCheckpointProducer(t *testing.T) {
 	}
 	requireRemoved(t, checkpoint)
 	requireRemoved(t, filepath.Join(base, "preparing"))
+}
+
+// Exercise real ExecRunner inheritance with an abruptly terminated parent, not
+// just two flock calls in one process. No root or procfs inspection is required.
+func TestBackupScratchLeaseSurvivesKilledParent(t *testing.T) {
+	e, s := cleanupFixture(t)
+	base := backupBase(e.Host.Root, "")
+	w, err := e.beginBackupWorkspace(e.Host.Root, "", *s)
+	must(t, err)
+	write(t, filepath.Join(base, "pending/data"), "retained for orphan")
+	e.finishBackupWorkspace(e.Host.Root, w, errors.New("interrupted upload"))
+	start := e.Now()
+	e.Now = func() time.Time { return start.Add(24 * time.Hour) }
+	exe, err := os.Executable()
+	must(t, err)
+	parent := exec.Command(exe, "-test.run=^TestBackupScratchLeaseHelper$")
+	parent.Env = append(os.Environ(), "MATRIX_TEST_LEASE_ROOT="+e.Host.Root, "MATRIX_TEST_LEASE_ROLE=parent")
+	must(t, parent.Start())
+	var child int
+	t.Cleanup(func() {
+		_ = parent.Process.Kill()
+		_ = parent.Wait()
+		if child != 0 {
+			_ = syscall.Kill(child, syscall.SIGKILL)
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		b, er := os.ReadFile(filepath.Join(e.Host.Root, "child-ready"))
+		if er == nil {
+			child, err = strconv.Atoi(string(b))
+			must(t, err)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if child == 0 {
+		t.Fatal("backup child did not start")
+	}
+	must(t, parent.Process.Kill())
+	_ = parent.Wait()
+	// The producer parent is gone, but both cleanup and a replacement backup
+	// must wait for its orphan child, regardless of procfs read permissions.
+	must(t, e.SweepBackupScratch(context.Background()))
+	if got := workspaceRead(t, base); got.State != "CLEANUP_PENDING" || !strings.Contains(got.Error, "使用锁") {
+		t.Fatalf("orphan lease did not protect scratch: %+v", got)
+	}
+	if err = e.Backup(context.Background(), false); err == nil || !strings.Contains(err.Error(), "使用锁") {
+		t.Fatalf("new backup did not honor the orphan lease: %v", err)
+	}
+	if _, err = (nativeBackupService{e}).Final(context.Background(), e.Host.Root, "move-orphan"); err == nil || !strings.Contains(err.Error(), "使用锁") {
+		t.Fatalf("final preparation did not honor the orphan lease: %v", err)
+	}
+	must(t, syscall.Kill(child, syscall.SIGKILL))
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		lease, er := lockBackupScratch(e.Host.Root)
+		if er == nil {
+			_ = lease.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	must(t, e.SweepBackupScratch(context.Background()))
+	if got := workspaceRead(t, base); got.State != "CLEANED" {
+		t.Fatalf("exited orphan still blocked cleanup: %+v", got)
+	}
+	requireRemoved(t, filepath.Join(base, "pending"))
+}
+
+func TestBackupScratchLeaseHelper(t *testing.T) {
+	root, role := os.Getenv("MATRIX_TEST_LEASE_ROOT"), os.Getenv("MATRIX_TEST_LEASE_ROLE")
+	if root == "" || role == "" {
+		return
+	}
+	if role == "child" {
+		lease := os.NewFile(3, "backup-lease")
+		if lease == nil {
+			t.Fatal("missing inherited lease")
+		}
+		defer lease.Close()
+		st, err := lease.Stat()
+		must(t, err)
+		want, err := os.Stat(filepath.Join(backupBase(root, ""), "readers.lock"))
+		must(t, err)
+		if !os.SameFile(st, want) {
+			t.Fatal("inherited descriptor is not the scratch lock")
+		}
+		must(t, os.WriteFile(filepath.Join(root, "child-ready"), []byte(strconv.Itoa(os.Getpid())), 0600))
+		time.Sleep(30 * time.Second) // bounded even if the test process itself dies
+		return
+	}
+	lease, err := lockBackupScratch(root)
+	must(t, err)
+	defer lease.Close()
+	ctx := context.WithValue(context.Background(), backupProcessLock{}, lease)
+	exe, err := os.Executable()
+	must(t, err)
+	_, err = (ExecRunner{}).Run(ctx, Command{Name: exe, Args: []string{"-test.run=^TestBackupScratchLeaseHelper$"}, Env: []string{"MATRIX_TEST_LEASE_ROOT=" + root, "MATRIX_TEST_LEASE_ROLE=child"}})
+	must(t, err)
 }

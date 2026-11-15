@@ -110,6 +110,9 @@ func (r ExecRunner) Run(ctx context.Context, c Command) ([]byte, error) {
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
+	if lease, ok := ctx.Value(backupProcessLock{}).(*os.File); ok {
+		cmd.ExtraFiles = []*os.File{lease}
+	}
 	cmd.Dir = c.Dir
 	cmd.Env = append([]string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LANG=C.UTF-8"}, c.Env...)
 	cmd.WaitDelay = 10 * time.Second
